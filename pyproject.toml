@@ -1,0 +1,27 @@
+[project]
+name = "nexus-sorter"
+version = "0.1.0"
+description = "Maya asset auto-sorter and pipeline cleanup tool"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "ruff>=0.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+# main_window.py and batch_processor.py touch cmds/PySide6 objects ruff
+# can't see the real type of, so this stays lenient on that front rather
+# than fighting the linter over Maya/Qt's own dynamic API surface
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # line-length is handled by line-length above, not a hard error
+
+[tool.black]
+line-length = 110
+target-version = ["py39"]

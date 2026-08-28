@@ -1,0 +1,12 @@
+{
+  "prefixes": {
+    "CH_": "GRP_01_CHARACTERS",
+    "SK_": "GRP_01_CHARACTERS",
+    "PR_": "GRP_02_PROPS",
+    "SM_": "GRP_02_PROPS",
+    "ENV_": "GRP_03_ENVIRONMENT",
+    "FX_": "GRP_04_VFX",
+    "LT_": "GRP_05_LIGHTING"
+  },
+  "purge_age_threshold_days": 14
+}
