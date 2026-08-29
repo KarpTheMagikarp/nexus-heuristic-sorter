@@ -62,10 +62,11 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         ("Unassigned", "UNASSIGNED_ASSETS"),
     ]
     # reverse of the above, so the tree can show "Characters" instead of
-    # the raw group name everywhere an artist actually looks. only covers
-    # real sort destinations on purpose, GRP_DEPRECATED_FOLDERS is not in
-    # DESTINATION_CHOICES and stays raw, that's a deliberate call not an oversight
+    # the raw group name. GRP_DEPRECATED_FOLDERS isn't a real destination (can't
+    # be reassigned to) but gets a friendly label too for clarity and raw was 
+    # clipping the column
     _DESTINATION_LABELS = {folder_name: label for label, folder_name in DESTINATION_CHOICES}
+    _DESTINATION_LABELS[NexusBatchProcessor.DEPRECATED_HOLDING_GROUP] = "Deprecated Folder"
 
     @classmethod
     def _display_destination(cls, destination: str) -> str:
@@ -342,15 +343,11 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
             self.feedback_label.setText(text)
 
     def _on_scope_changed(self, index: int) -> None:
-        # both scopes load every asset, Selected Assets only changes whether rows get checkboxes.
-        # only Selected Assets gets a hint - it silently pre-checks your current viewport
-        # selection, which you'd never guess without being told. All Assets has nothing
-        # non-obvious to explain, the absence of checkboxes already shows you the behavior
+        # forgetting to select something first makes this look identical to
+        # All Assets - same full tree, just nothing checked, you won't know
+        # until Commit says there's nothing staged
         if index == 0:
-            self.statusBar().showMessage(
-                "Loads every asset - starts with your current viewport "
-                "selection pre-checked, so you can adjust before committing."
-            )
+            self.statusBar().showMessage("Pre-checks whatever's currently selected in the viewport.")
         else:
             self.statusBar().clearMessage()
 
@@ -1077,7 +1074,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
                 occupancy = "empty" if candidate["child_count"] == 0 else f"{candidate['child_count']} objects inside"
                 row = QtWidgets.QTreeWidgetItem([
                     candidate["name"], f"Not sorted ({occupancy})", "",
-                    f"→ {self.engine.DEPRECATED_HOLDING_GROUP}",
+                    f"→ {self._display_destination(self.engine.DEPRECATED_HOLDING_GROUP)}",
                 ])
                 row.setFlags(row.flags() | QtCore.Qt.ItemIsUserCheckable)
                 # opt-out here unlike the asset checkboxes above, these are
