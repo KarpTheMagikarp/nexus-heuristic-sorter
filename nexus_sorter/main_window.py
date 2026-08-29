@@ -702,9 +702,15 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         else:
             self.purge_execute_btn.setText("Purge Old Backups")
 
-        self.purge_execute_btn.setEnabled(
-            (has_manifest_eligible or bool(checked_candidates)) and self.purge_confirm_checkbox.isChecked()
-        )
+        can_purge = (has_manifest_eligible or bool(checked_candidates)) and self.purge_confirm_checkbox.isChecked()
+        self.purge_execute_btn.setEnabled(can_purge)
+        # same red as COLOR_PURGE_WARNING, low-alpha tint like COLOR_STRAY_BG
+        # but stronger since a full button needs more alpha to actually show
+        # tied to can_purge so the color can never disagree with setEnabled
+        if can_purge:
+            self.purge_execute_btn.setStyleSheet("background-color: rgba(255, 68, 68, 140);")
+        else:
+            self.purge_execute_btn.setStyleSheet("")
 
     def _on_tree_item_expanded(self, item: QtWidgets.QTreeWidgetItem) -> None:
         # only the stray candidates section has an embedded widget,
