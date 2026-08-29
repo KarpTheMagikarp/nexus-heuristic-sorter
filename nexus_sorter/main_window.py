@@ -39,6 +39,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
 
     # fixed pixel buffer added to column widths to prevent text clipping
     COLUMN_BREATHING_ROOM = 18
+    MAX_ASSET_COLUMN_WIDTH = 220
 
     # sections with this many rows or fewer open by default, so a small
     # manual-review pile or candidate list doesn't need an extra click to
@@ -177,6 +178,10 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         self._filter_timer.timeout.connect(self._apply_pending_filter)
         self.search_field.textChanged.connect(self._on_filter_text_changed)
         layout.addWidget(self.search_field)
+        self._column_resize_timer = QtCore.QTimer(self)
+        self._column_resize_timer.setSingleShot(True)
+        self._column_resize_timer.setInterval(50)
+        self._column_resize_timer.timeout.connect(self._finalize_column_widths)
 
         self.preview_tree = QtWidgets.QTreeWidget()
         self.preview_tree.setHeaderLabels(["Asset", "Status", "Proposed", "Destination"])
@@ -405,12 +410,10 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         if first_seed:
             self._selected_scope_seeded = True
 
-        # column 0 needs a re-measure now that checkable rows appeared/disappeared
-        self.preview_tree.resizeColumnToContents(0)
-        self.preview_tree.setColumnWidth(
-            0, self.preview_tree.columnWidth(0) + self.COLUMN_BREATHING_ROOM
-        )
-        self.preview_tree.viewport().update()
+        # this used to skip the width cap and let col 3 get crushed on
+        # scope switch (stretch fills whatever col 0 leaves). just route
+        # through the real function now
+        self._finalize_column_widths()
 
     def _on_selection_changed(self) -> None:
         # no-op now, tooltip handles the hint instead of the status bar
@@ -1108,6 +1111,20 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
             if 0 < top_item.childCount() <= self.AUTO_EXPAND_THRESHOLD:
                 top_item.setExpanded(True)
 
+        QtCore.QTimer.singleShot(0, self._finalize_column_widths)
+
+        self.commit_btn.setEnabled(True)
+        summary = f"Found {len(result['plan'])} assets."
+        if manual_pile:
+            summary += f" {len(manual_pile)} need manual review."
+        if skipped_pile:
+            summary += f" {len(skipped_pile)} skipped (locked/referenced)."
+        if stray_folders:
+            summary += f" {len(stray_folders)} deprecated folder candidate(s) found (moved to a safe holding folder, never deleted) - review before committing."
+        self._set_feedback(summary, self.COLOR_WARN if (manual_pile or skipped_pile or stray_folders) else None)
+        self.statusBar().showMessage("Ready to commit.")
+
+    def _finalize_column_widths(self) -> None:
         # resizeColumnToContents only measures VISIBLE rows, and every
         # group here starts collapsed, so it was under-measuring off empty
         # header rows and clipping real text once a group got opened.
@@ -1130,6 +1147,9 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
 
         for item, was_expanded in zip(top_level_items, original_expand_states):
             item.setExpanded(was_expanded)
+        self.preview_tree.setColumnWidth(
+            0, min(self.preview_tree.columnWidth(0), self.MAX_ASSET_COLUMN_WIDTH)
+        )
 
         # column 1 (Status now, was Proposed before the reorder) still needs
         # a floor since the Deselect All widget lives there too and only
@@ -1137,16 +1157,13 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         # right after, so this measure never actually sees it
         self.preview_tree.setColumnWidth(1, max(self.preview_tree.columnWidth(1), 140))
 
-        self.commit_btn.setEnabled(True)
-        summary = f"Found {len(result['plan'])} assets."
-        if manual_pile:
-            summary += f" {len(manual_pile)} need manual review."
-        if skipped_pile:
-            summary += f" {len(skipped_pile)} skipped (locked/referenced)."
-        if stray_folders:
-            summary += f" {len(stray_folders)} deprecated folder candidate(s) found (moved to a safe holding folder, never deleted) - review before committing."
-        self._set_feedback(summary, self.COLOR_WARN if (manual_pile or skipped_pile or stray_folders) else None)
-        self.statusBar().showMessage("Ready to commit.")
+        # floor it against a direct measurement instead of trusting
+        # resizeColumnToContents alone for this column
+        deprecated_folder_text = f"\u2192 {self._DESTINATION_LABELS[NexusBatchProcessor.DEPRECATED_HOLDING_GROUP]}"
+        metrics = QtGui.QFontMetrics(self.preview_tree.font())
+        needed_width = metrics.horizontalAdvance(deprecated_folder_text) + self.COLUMN_BREATHING_ROOM + 30
+        self.preview_tree.setColumnWidth(3, max(self.preview_tree.columnWidth(3), needed_width))
+        self.preview_tree.viewport().update()
 
     def _on_filter_text_changed(self, _text: str) -> None:
         # just restart the debounce window - the actual filtering happens in
@@ -1542,6 +1559,14 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
             return True
         return super().eventFilter(obj, event)
 
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        # catches the docking workspace control's own settle-resize after
+        # first show, not just manual dragging - that settle is what was
+        # racing run_analysis's one-shot finalize and winning
+        super().resizeEvent(event)
+        if self.preview_tree.topLevelItemCount() > 0:
+            self._column_resize_timer.start()
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         # breaks signal connections holding a live reference back to this
         # window, so closing actually frees it instead of leaking a
@@ -1562,6 +1587,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         self.preview_tree.removeEventFilter(self)
         self._filter_timer.stop()
         self._purge_preview_timer.stop()  # same reasoning, don't tick past window close
+        self._column_resize_timer.stop()
         self.current_execution_plan = []
         super().closeEvent(event)
 
