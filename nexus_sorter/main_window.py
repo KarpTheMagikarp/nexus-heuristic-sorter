@@ -11,6 +11,7 @@ from maya.app.general.mayaMixin import MayaQWidgetDockableMixin
 
 from .config import logger
 from .hierarchy import MayaUndoChunk
+from .naming import NamingResolver
 from .categorization import CategorizationEngine, Confidence, AssignmentSource
 from .batch_processor import NexusBatchProcessor
 from .lifecycle import is_stray_category_folder
@@ -538,22 +539,49 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         data["source"] = AssignmentSource.USER_FORCED
         data["confidence"] = Confidence.HIGH
 
+        # rig-shielded roots never get prefix surgery in the first place
+        # (sanitize_name_strict doesn't take a destination), nothing to
+        # re-derive there. everything else gets re-run through the same
+        # naming pipeline analyze_sorting_plan itself uses, so a
+        # reassigned Prop doesn't sit in GRP_03_ENVIRONMENT still wearing
+        # a Pr_ prefix. checked against the same two pools the engine
+        # checks: what's really already in that folder in the scene,
+        # plus anything else in this not-yet-committed plan already
+        # headed there (so two reassigns to the same folder in one
+        # batch still can't collide with each other either)
+        if not data.get("is_shielded"):
+            sibling_names = NexusBatchProcessor._existing_children_names(folder_name)
+            sibling_names.update(
+                plan_item["proposed"] for plan_item in self.current_execution_plan
+                if plan_item.get("destination") == folder_name
+                and plan_item.get("long_path") != data.get("long_path")
+            )
+            data["proposed"] = NamingResolver.get_stable_name(
+                raw_current_name=data["original"],
+                sibling_names=sibling_names,
+                name_deriver=lambda canonical: CategorizationEngine.derive_proposed_name(canonical, folder_name),
+            )
+
         for plan_item in self.current_execution_plan:
             if plan_item.get("long_path") == data.get("long_path"):
                 plan_item["destination"] = folder_name
                 plan_item["source"] = AssignmentSource.USER_FORCED
                 plan_item["confidence"] = Confidence.HIGH
+                plan_item["proposed"] = data["proposed"]
                 break
 
+        item.setText(2, data["proposed"])
         item.setText(3, self._display_destination(folder_name))
         # flagged Pending Commit, not just "Ready", so it doesn't look
         # already applied when it's still a staged edit
         item.setText(1, f"{self._status_text_for(data)} · Pending Commit")
-        for col in range(4):
-            item.setForeground(col, QtGui.QBrush(self.COLOR_STAGED))
+        # destination only, not the whole row - that's the actual thing
+        # that changed, coloring all 4 columns buried the real signal
+        item.setForeground(3, QtGui.QBrush(self.COLOR_STAGED))
 
         self.statusBar().showMessage(
-            f"Staged {data['original']} → {folder_name}. Click Commit Changes to move it in the scene."
+            f"Staged {data['original']} → {folder_name} as {data['proposed']}. "
+            f"Click Commit Changes to move it in the scene."
         )
 
     @staticmethod
