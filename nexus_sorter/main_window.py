@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 import maya.cmds as cmds
-from PySide6 import QtWidgets, QtCore, QtGui
+from .qt_compat import QtWidgets, QtCore, QtGui
 from maya.app.general.mayaMixin import MayaQWidgetDockableMixin
 
 from .config import logger
@@ -36,7 +36,7 @@ class _WrappingCheckboxLabel(QtWidgets.QLabel):
 
 class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
     # tooltip for every asset row, set once in run_analysis
-    ROW_TOOLTIP = "Double-click to frame item in 3D viewport • Right-click to manually reassign category."
+    ROW_TOOLTIP = "Double-click to frame item in 3D viewport • Right-click, or click the ▼ on Destination, to reassign category."
 
     # fixed pixel buffer added to column widths to prevent text clipping
     COLUMN_BREATHING_ROOM = 18
@@ -162,6 +162,12 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
 
         self.force_combo = QtWidgets.QComboBox()
         self.force_combo.addItems(["Auto-Detect", "01_CHARACTERS", "02_PROPS", "03_ENVIRONMENT", "04_VFX", "05_LIGHTING"])
+        # lets Override double as a bulk-reassign shortcut for whatever
+        # the current scope considers in play, not just a pre-Analyze setting
+        self.force_combo.currentIndexChanged.connect(self._on_force_override_changed)
+        # lets Override double as a bulk-reassign shortcut for whatever's
+        # currently checked, not just a pre-Analyze setting
+        self.force_combo.currentIndexChanged.connect(self._on_force_override_changed)
 
         top_layout.addWidget(QtWidgets.QLabel("Scope:"))
         top_layout.addWidget(self.scope_combo)
@@ -218,7 +224,9 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
 
         layout.addWidget(self.preview_tree)
 
-        self.freeze_checkbox = QtWidgets.QCheckBox("Also freeze unfrozen transforms on commit")
+        self.freeze_checkbox = QtWidgets.QCheckBox(
+            "Freeze unfrozen transforms on commit (rigs and skeletons are always exempt)"
+        )
         self.freeze_checkbox.setToolTip(
             "Off by default on purpose. Freezing bakes translate/rotate/scale to\n"
             "identity - safe for a plain static prop, but maya will refuse it on\n"
@@ -226,6 +234,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
             "curves) or on instanced geometry. Rig-shielded assets are always\n"
             "skipped regardless of this checkbox."
         )
+        self.freeze_checkbox.toggled.connect(self._on_freeze_checkbox_toggled)
         layout.addWidget(self.freeze_checkbox)
 
         # this is the "what did you actually do" readout - statusBar text is too
@@ -454,24 +463,24 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
                         it.setCheckState(0, QtCore.Qt.Checked)
             return
 
-        # column 3, click on the arrow opens the dropdown, click on the
-        # text is plain selection. cell_zones is the same function paint()
-        # uses so drawn and clickable positions can't drift apart
-        if (column == 3 and item is not None and item.childCount() == 0
-                and QtWidgets.QApplication.keyboardModifiers() == QtCore.Qt.NoModifier):
-            index = self.preview_tree.indexFromItem(item, column)
-            cell_rect = self.preview_tree.visualRect(index)
-            click_pos = self.preview_tree.viewport().mapFromGlobal(QtGui.QCursor.pos())
-            _text_rect, arrow_rect = DestinationDelegate.cell_zones(
-                cell_rect, self.preview_tree.font(), item.text(column)
-            )
-            if arrow_rect.contains(click_pos):
-                self.preview_tree.editItem(item, column)
+        # column 3's arrow click is now handled directly in
+        # DestinationDelegate.editorEvent, off the real mouse event
+        # instead of reconstructing click position from QCursor.pos()
+        # after the fact - that reconstruction was the actual bug,
+        # confirmed with a real click simulation: itemClicked always
+        # fired, but the position check almost never passed
 
     def _on_item_double_clicked(self, item: QtWidgets.QTreeWidgetItem | None, column: int) -> None:
         # only explicit action allowed to touch viewport selection,
         # everything else in analysis stays passive
         if item is None or item.childCount() > 0:
+            return
+        if column == 3:
+            # this column already has its own single-click interaction -
+            # the arrow opens a dropdown (see DestinationDelegate /
+            # _on_item_clicked). a fast double-click while using that
+            # dropdown shouldn't ALSO yank the viewport to a different
+            # object mid-interaction, so this column opts out of framing
             return
         data = item.data(0, QtCore.Qt.UserRole)
         if not data:
@@ -525,19 +534,127 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         for it, d in targets:
             self._reassign_destination(it, d, folder_name)
 
-        if len(targets) > 1:
-            self.statusBar().showMessage(
-                f"Staged {len(targets)} selected assets \u2192 {folder_name}. "
-                f"Click Commit Changes to move them in the scene."
-            )
+        # "· Pending Commit" (and a possibly longer re-derived name) can
+        # push a cell past its current column width - same debounced
+        # remeasure resizeEvent already uses, not a fresh one-off
+        self._column_resize_timer.start()
 
-    def _reassign_destination(self, item: QtWidgets.QTreeWidgetItem, data: PlanItem, folder_name: str) -> None:
+        if len(targets) > 1:
+            self.statusBar().showMessage(f"Staged {len(targets)} selected assets \u2192 {folder_name}.")
+
+    def _on_force_override_changed(self, _index: int) -> None:
+        text = self.force_combo.currentText()
+        if text == "Auto-Detect":
+            self._apply_auto_detect_to_scope_targets()
+            return
+        folder_name = NexusBatchProcessor.FORCE_CATEGORY_MAP.get(text)
+        if not folder_name:
+            return
+        self._apply_override_to_scope_targets(folder_name)
+
+    def _apply_auto_detect_to_scope_targets(self) -> None:
+        """restores whichever rows the current scope considers "in play"
+        back to whatever real anatomy/name detection says right now,
+        undoing any earlier manual override. genuinely different from
+        _apply_override_to_scope_targets: every OTHER Override option is
+        one fixed folder for the whole batch, but "what would auto-detect
+        say" is its own separate answer for every individual row, so
+        each target gets its own fresh analyze_asset_dna call rather
+        than one shared folder_name.
+
+        shielded assets are skipped entirely - shielding was decided
+        once at Analyze time and determines which node the row even
+        represents (the whole rig root, not just this object). safely
+        redoing that live would mean re-grouping the tree itself, not
+        just changing where one existing row points, so it's out of
+        scope for a per-row revert like this one."""
+        select_scope_active = (self.scope_combo.currentIndex() == 0)
+
+        targets = []
+        for i in range(self.preview_tree.topLevelItemCount()):
+            top = self.preview_tree.topLevelItem(i)
+            if top is self.stray_folder_group or top is self.skipped_group:
+                continue
+            for j in range(top.childCount()):
+                row = top.child(j)
+                data = row.data(0, QtCore.Qt.UserRole)
+                if not data or data.get("source") == AssignmentSource.SKIPPED_REFERENCED:
+                    continue
+                if not select_scope_active or row.checkState(0) == QtCore.Qt.Checked:
+                    targets.append((row, data))
+
+        if not targets:
+            self.statusBar().showMessage("Check the assets you want, then pick Auto-Detect.")
+            return
+
+        reverted = 0
+        for it, d in targets:
+            if d.get("is_shielded"):
+                continue
+            if not cmds.objExists(d["long_path"]):
+                continue
+            dest, confidence, _needs_shield = CategorizationEngine.analyze_asset_dna(d["long_path"], d["original"])
+            self._reassign_destination(it, d, dest, source=AssignmentSource.AUTO_DETECTED, confidence=confidence)
+            reverted += 1
+        self._column_resize_timer.start()
+
+        self.statusBar().showMessage(f"Reverted {reverted} asset(s) to their auto-detected category.")
+
+    def _apply_override_to_scope_targets(self, folder_name: str) -> None:
+        """bulk-reassigns whichever rows the CURRENT SCOPE considers "in
+        play" - checked rows under Selected Assets (real per-row
+        curation), or every eligible row under All Assets, since there's
+        no checkbox there at all and "everything" is the only coherent
+        meaning - same rule _checked_asset_long_paths already applies
+        for what gets committed, just reused here for what gets
+        overridden. deliberately NOT based on tree highlight/selection -
+        that's what shift/ctrl-click uses to batch a checkbox toggle in
+        one go, but it's also exactly what clicking into this combo box
+        immediately clears (see eventFilter's FocusOut handling)."""
+        select_scope_active = (self.scope_combo.currentIndex() == 0)
+
+        targets = []
+        for i in range(self.preview_tree.topLevelItemCount()):
+            top = self.preview_tree.topLevelItem(i)
+            if top is self.stray_folder_group or top is self.skipped_group:
+                continue
+            for j in range(top.childCount()):
+                row = top.child(j)
+                data = row.data(0, QtCore.Qt.UserRole)
+                if not data or data.get("source") == AssignmentSource.SKIPPED_REFERENCED:
+                    continue
+                if not select_scope_active or row.checkState(0) == QtCore.Qt.Checked:
+                    targets.append((row, data))
+
+        if not targets:
+            self.statusBar().showMessage("Check the assets you want, then pick an override.")
+            return
+
+        for it, d in targets:
+            self._reassign_destination(it, d, folder_name)
+        self._column_resize_timer.start()
+
+        self.statusBar().showMessage(f"Staged {len(targets)} asset(s) → {folder_name}.")
+
+    def _reassign_destination(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        data: PlanItem,
+        folder_name: str,
+        source: AssignmentSource = AssignmentSource.USER_FORCED,
+        confidence: Confidence = Confidence.HIGH,
+    ) -> None:
         # data IS the same dict object stored on the row (not a copy) so
         # mutating it already reaches current_execution_plan, the explicit
         # re-sync below is just a second guarantee in case that ever changes
+        # defaults preserve every existing caller's behavior (a manual
+        # pick is always a USER_FORCED/HIGH override) - only the new
+        # Auto-Detect revert path passes real values through, since
+        # calling that one "User Override" would be backwards - it's
+        # literally UN-overriding the row, not overriding it again
         data["destination"] = folder_name
-        data["source"] = AssignmentSource.USER_FORCED
-        data["confidence"] = Confidence.HIGH
+        data["source"] = source
+        data["confidence"] = confidence
 
         # rig-shielded roots never get prefix surgery in the first place
         # (sanitize_name_strict doesn't take a destination), nothing to
@@ -565,34 +682,88 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         for plan_item in self.current_execution_plan:
             if plan_item.get("long_path") == data.get("long_path"):
                 plan_item["destination"] = folder_name
-                plan_item["source"] = AssignmentSource.USER_FORCED
-                plan_item["confidence"] = Confidence.HIGH
+                plan_item["source"] = source
+                plan_item["confidence"] = confidence
                 plan_item["proposed"] = data["proposed"]
                 break
 
         item.setText(2, data["proposed"])
         item.setText(3, self._display_destination(folder_name))
-        # flagged Pending Commit, not just "Ready", so it doesn't look
-        # already applied when it's still a staged edit
-        item.setText(1, f"{self._status_text_for(data)} · Pending Commit")
+        # refreshes Ready/Needs Freeze text AND coloring, not just text - a
+        # reassignment can move a row into or out of a freeze-blocked
+        # category, and without this a formerly amber row could keep
+        # showing stale amber even after its status text correctly
+        # flips to "Ready (Rig Shielded)"
+        self._apply_freeze_status_style(item, data)
         # destination only, not the whole row - that's the actual thing
         # that changed, coloring all 4 columns buried the real signal
         item.setForeground(3, QtGui.QBrush(self.COLOR_STAGED))
 
-        self.statusBar().showMessage(
-            f"Staged {data['original']} → {folder_name} as {data['proposed']}. "
-            f"Click Commit Changes to move it in the scene."
-        )
+        self.statusBar().showMessage(f"Staged {data['original']} → {folder_name} as {data['proposed']}.")
 
-    @staticmethod
-    def _status_text_for(data: PlanItem) -> str:
+    def _status_text_for(self, data: PlanItem) -> str:
         # characters/vfx never show Needs Freeze, baking those breaks rigs
         if CategorizationEngine.is_freeze_blocked(data["destination"]):
             return "Ready (Rig Shielded)"
-        text = "Ready" if data["is_frozen"] else "Needs Freeze"
+        # checking "freeze on commit" resolves an unfrozen transform
+        # automatically at commit time (see execute_commit's
+        # freeze_eligible pass-through) - showing amber "Needs Freeze"
+        # here anyway would be flagging a problem the tool's already
+        # been told to go fix by itself
+        text = "Ready" if (data["is_frozen"] or self.freeze_checkbox.isChecked()) else "Needs Freeze"
         if data.get("is_shielded"):
             text += " · Rig Shield"
         return text
+
+    def _apply_freeze_status_style(self, item: QtWidgets.QTreeWidgetItem, data: PlanItem) -> None:
+        """(re)applies the Ready-vs-Needs-Freeze text and coloring for one
+        main-group row. pulled out on its own so toggling the freeze-on-
+        commit checkbox can refresh every already-displayed row live
+        (see _on_freeze_checkbox_toggled) using the exact same styling
+        run_analysis itself uses on first build - resets both directions
+        explicitly (font weight, background), since a live refresh has
+        to be able to undo the OTHER branch's styling too, not just
+        layer its own on top of whatever's already sitting there."""
+        status_text = self._status_text_for(data)
+        item.setText(1, status_text)
+        if status_text.startswith("Ready"):
+            item.setForeground(0, QtGui.QBrush(self.COLOR_TEXT_ASSET))
+            item.setForeground(1, QtGui.QBrush(self.COLOR_TEXT_STATUS_READY))
+            item.setForeground(2, QtGui.QBrush(self.COLOR_TEXT_PROPOSED))
+            item.setForeground(3, QtGui.QBrush(self.COLOR_TEXT_DESTINATION))
+            status_font = item.font(1)
+            status_font.setBold(False)
+            item.setFont(1, status_font)
+            row_bg = self._confidence_background(data["confidence"])
+            for col in range(4):
+                item.setBackground(col, QtGui.QBrush(row_bg) if row_bg is not None else QtGui.QBrush())
+        elif "Needs Freeze" in status_text:
+            for col in (0, 2, 3):
+                item.setForeground(col, QtGui.QBrush(self.COLOR_WARN))
+            item.setForeground(1, QtGui.QBrush(self.COLOR_TEXT_STATUS_NEEDS_FREEZE))
+            status_font = item.font(1)
+            status_font.setBold(True)
+            item.setFont(1, status_font)
+            for col in range(4):
+                item.setBackground(col, QtGui.QBrush())
+
+    def _on_freeze_checkbox_toggled(self, _checked: bool) -> None:
+        """live-refreshes every already-displayed asset row's Ready/Needs
+        Freeze text and coloring the instant this checkbox changes,
+        instead of leaving stale amber warnings on rows the commit is
+        now going to freeze automatically anyway. only touches the main
+        per-category groups - manual/skipped/stray rows never showed
+        freeze status to begin with."""
+        for i in range(self.preview_tree.topLevelItemCount()):
+            top = self.preview_tree.topLevelItem(i)
+            if top is self.manual_group or top is self.skipped_group or top is self.stray_folder_group:
+                continue
+            for j in range(top.childCount()):
+                row = top.child(j)
+                data = row.data(0, QtCore.Qt.UserRole)
+                if not data:
+                    continue
+                self._apply_freeze_status_style(row, data)
 
     @contextmanager
     def _ui_busy(self) -> Iterator[None]:
@@ -945,10 +1116,14 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
                 header_font.setBold(True)
                 grp.setFont(0, header_font)
 
-            status_text = self._status_text_for(data)
             item = QtWidgets.QTreeWidgetItem([
-                data["original"], status_text, data["proposed"], self._display_destination(data["destination"]),
+                data["original"], "", data["proposed"], self._display_destination(data["destination"]),
             ])
+            # without this, DestinationDelegate.editorEvent can detect the
+            # arrow click correctly and still get nothing - Qt's own
+            # edit() silently refuses on any index whose item lacks
+            # ItemIsEditable, independent of editTriggers entirely
+            item.setFlags(item.flags() | QtCore.Qt.ItemIsEditable)
             # right-click/double-click handlers pull this back out via column-0 UserRole
             item.setData(0, QtCore.Qt.UserRole, data)
             # set on every column, not just column 0, so the tooltip fires
@@ -977,33 +1152,12 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
                 item.setFlags(item.flags() & ~QtCore.Qt.ItemIsUserCheckable)
                 item.setData(0, QtCore.Qt.CheckStateRole, None)
 
-            # startswith/in, not ==, since _status_text_for can append
-            # " . Rig Shield" onto either status and an exact match would
-            # silently stop coloring the row the moment that's reachable
-            if status_text.startswith("Ready"):
-                # text color says what kind of data it is, row background
-                # says how much to trust it, two separate channels instead
-                # of one fighting the other
-                item.setForeground(0, QtGui.QBrush(self.COLOR_TEXT_ASSET))
-                item.setForeground(1, QtGui.QBrush(self.COLOR_TEXT_STATUS_READY))
-                item.setForeground(2, QtGui.QBrush(self.COLOR_TEXT_PROPOSED))
-                item.setForeground(3, QtGui.QBrush(self.COLOR_TEXT_DESTINATION))
-                row_bg = self._confidence_background(data["confidence"])
-                if row_bg is not None:
-                    for col in range(4):
-                        item.setBackground(col, QtGui.QBrush(row_bg))
-            elif "Needs Freeze" in status_text:
-                # no background wash here, that read as noisier than needed.
-                # whole row goes amber instead so it reads as one consistent signal.
-                # explicit column list, not range(3) - that used to work only
-                # because Status happened to be the last column, would've
-                # silently colored the wrong column the moment that stopped being true
-                for col in (0, 2, 3):
-                    item.setForeground(col, QtGui.QBrush(self.COLOR_WARN))
-                item.setForeground(1, QtGui.QBrush(self.COLOR_TEXT_STATUS_NEEDS_FREEZE))
-                status_font = item.font(1)
-                status_font.setBold(True)
-                item.setFont(1, status_font)
+            # text + Ready/Needs Freeze coloring both live in one place now
+            # (_apply_freeze_status_style) so toggling the freeze-on-commit
+            # checkbox later can refresh an already-built row the exact
+            # same way this initial build does, instead of duplicating
+            # the same text-vs-color branching in two places
+            self._apply_freeze_status_style(item, data)
 
             grp.addChild(item)
 
@@ -1024,6 +1178,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
                 row = QtWidgets.QTreeWidgetItem([
                     data["original"], "Needs Review", data["proposed"], self._display_destination(data["destination"]),
                 ])
+                row.setFlags(row.flags() | QtCore.Qt.ItemIsEditable)
                 for col in range(4):
                     row.setForeground(col, QtGui.QBrush(self.COLOR_WARN))
                     row.setToolTip(col, self.ROW_TOOLTIP)
@@ -1111,7 +1266,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
                 occupancy = "empty" if candidate["child_count"] == 0 else f"{candidate['child_count']} objects inside"
                 row = QtWidgets.QTreeWidgetItem([
                     candidate["name"], f"Not sorted ({occupancy})", "",
-                    f"→ {self._display_destination(self.engine.DEPRECATED_HOLDING_GROUP)}",
+                    self._display_destination(self.engine.DEPRECATED_HOLDING_GROUP),
                 ])
                 row.setFlags(row.flags() | QtCore.Qt.ItemIsUserCheckable)
                 # opt-out here unlike the asset checkboxes above, these are
@@ -1142,13 +1297,13 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._finalize_column_widths)
 
         self.commit_btn.setEnabled(True)
-        summary = f"Found {len(result['plan'])} assets."
+        summary = f"{len(result['plan'])} assets found."
         if manual_pile:
-            summary += f" {len(manual_pile)} need manual review."
+            summary += f" {len(manual_pile)} need review."
         if skipped_pile:
             summary += f" {len(skipped_pile)} skipped (locked/referenced)."
         if stray_folders:
-            summary += f" {len(stray_folders)} deprecated folder candidate(s) found (moved to a safe holding folder, never deleted) - review before committing."
+            summary += f" {len(stray_folders)} deprecated folder(s) flagged."
         self._set_feedback(summary, self.COLOR_WARN if (manual_pile or skipped_pile or stray_folders) else None)
         self.statusBar().showMessage("Ready to commit.")
 
@@ -1187,7 +1342,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
 
         # floor it against a direct measurement instead of trusting
         # resizeColumnToContents alone for this column
-        deprecated_folder_text = f"\u2192 {self._DESTINATION_LABELS[NexusBatchProcessor.DEPRECATED_HOLDING_GROUP]}"
+        deprecated_folder_text = self._DESTINATION_LABELS[NexusBatchProcessor.DEPRECATED_HOLDING_GROUP]
         metrics = QtGui.QFontMetrics(self.preview_tree.font())
         needed_width = metrics.horizontalAdvance(deprecated_folder_text) + self.COLUMN_BREATHING_ROOM + 30
         self.preview_tree.setColumnWidth(3, max(self.preview_tree.columnWidth(3), needed_width))

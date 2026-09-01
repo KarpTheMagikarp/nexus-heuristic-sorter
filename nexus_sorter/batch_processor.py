@@ -16,6 +16,18 @@ from .schema import PlanItem, StrayFolderCandidate, PurgeManifest
 
 
 class NexusBatchProcessor:
+    # shared with main_window.py's Override toolbar dropdown, so a bulk
+    # reassign from there and a fresh Analyze's force_category both map
+    # the same combo text to the same real folder name - one dict, not
+    # two that can quietly drift apart
+    FORCE_CATEGORY_MAP = {
+        "01_CHARACTERS": "GRP_01_CHARACTERS",
+        "02_PROPS": "GRP_02_PROPS",
+        "03_ENVIRONMENT": "GRP_03_ENVIRONMENT",
+        "04_VFX": "GRP_04_VFX",
+        "05_LIGHTING": "GRP_05_LIGHTING",
+    }
+
     def __init__(self) -> None:
         self.studio_hierarchy: dict[str, list] = {
             "GRP_01_CHARACTERS": [],
@@ -101,14 +113,7 @@ class NexusBatchProcessor:
                 auto_dest, auto_confidence, needs_shield = CategorizationEngine.analyze_asset_dna(transform_node, short_name)
 
                 if force_category and "Auto-Detect" not in force_category:
-                    mapper = {
-                        "01_CHARACTERS": "GRP_01_CHARACTERS",
-                        "02_PROPS": "GRP_02_PROPS",
-                        "03_ENVIRONMENT": "GRP_03_ENVIRONMENT",
-                        "04_VFX": "GRP_04_VFX",
-                        "05_LIGHTING": "GRP_05_LIGHTING",
-                    }
-                    primary_dest = mapper.get(force_category, "UNASSIGNED_ASSETS")
+                    primary_dest = self.FORCE_CATEGORY_MAP.get(force_category, "UNASSIGNED_ASSETS")
                     confidence = Confidence.HIGH
                     source = AssignmentSource.USER_FORCED
                 else:

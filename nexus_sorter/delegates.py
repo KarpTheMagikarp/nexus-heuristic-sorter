@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
-from PySide6 import QtWidgets, QtCore, QtGui
+from .qt_compat import QtWidgets, QtCore, QtGui, HAS_CHECK_INDICATOR_FEATURE
 
 from .categorization import AssignmentSource
 
@@ -60,6 +60,44 @@ class DestinationDelegate(QtWidgets.QStyledItemDelegate):
         if data.get("source") == AssignmentSource.SKIPPED_REFERENCED:
             return None, None
         return item, data
+
+    def editorEvent(
+        self,
+        event: QtCore.QEvent,
+        model: QtCore.QAbstractItemModel,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> bool:
+        """catches the arrow click directly off the real mouse event,
+        instead of the old approach (main_window.py's _on_item_clicked
+        reconstructing "where was the click" after the fact from
+        QtGui.QCursor.pos()). that's a global OS-level cursor query with
+        no guaranteed relationship to the actual click position by the
+        time it runs - confirmed with an actual simulated click, not a
+        guess: itemClicked fired every single time, but the QCursor.pos()
+        position it read almost never matched arrow_rect, so editItem()
+        just silently never got called. a QMouseEvent handed to
+        editorEvent carries its own accurate position captured at the
+        moment of the event, no cursor query needed at all.
+
+        left button only - right-click already opens the full reassign
+        menu for the whole row via a separate, working mechanism (see
+        main_window.py's customContextMenuRequested handling), arrow
+        included, so there's nothing missing to duplicate here."""
+        if (event.type() == QtCore.QEvent.Type.MouseButtonRelease
+                and event.button() == QtCore.Qt.MouseButton.LeftButton):
+            item, _data = self._editable_row(index)
+            if item is not None:
+                plain_text = item.text(index.column())
+                _text_rect, arrow_rect = self.cell_zones(option.rect, option.font, plain_text)
+                try:
+                    click_pos = event.position().toPoint()
+                except AttributeError:
+                    click_pos = event.pos()
+                if arrow_rect.contains(click_pos):
+                    self._ui.preview_tree.editItem(item, index.column())
+                    return True
+        return super().editorEvent(event, model, option, index)
 
     @staticmethod
     def cell_zones(
@@ -307,7 +345,7 @@ class AssetCheckDelegate(QtWidgets.QStyledItemDelegate):
             # regardless of the actual flag, so force the indicator off
             opt = QtWidgets.QStyleOptionViewItem(option)
             self.initStyleOption(opt, index)
-            opt.features &= ~QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+            opt.features &= ~HAS_CHECK_INDICATOR_FEATURE
             style = opt.widget.style() if opt.widget else QtWidgets.QApplication.style()
             style.drawControl(QtWidgets.QStyle.CE_ItemViewItem, opt, painter, opt.widget)
             return
@@ -317,7 +355,7 @@ class AssetCheckDelegate(QtWidgets.QStyledItemDelegate):
         opt.text = ""  # drawn manually below, indented past the box
         # without clearing this, drawControl paints its OWN native
         # checkbox underneath the manual one below, doubled checkmark look
-        opt.features &= ~QtWidgets.QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        opt.features &= ~HAS_CHECK_INDICATOR_FEATURE
         style = opt.widget.style() if opt.widget else QtWidgets.QApplication.style()
         style.drawControl(QtWidgets.QStyle.CE_ItemViewItem, opt, painter, opt.widget)
 
