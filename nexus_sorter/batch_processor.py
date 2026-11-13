@@ -97,6 +97,7 @@ class NexusBatchProcessor:
         seen_transforms = set()
         claimed_names = {}
         checked_roots = {}
+        rig_roots = {}
 
         for shape_path in target_shapes:
             root_parent = HierarchyManager.get_dag_path(shape_path)
@@ -144,10 +145,14 @@ class NexusBatchProcessor:
             # rig shield grabs the whole asset from its top group instead of
             # renaming the joint/mesh that tripped pass 1
             is_shielded = needs_shield and not is_referenced
-            move_target = (
-                HierarchyManager.get_root_ancestor(transform_node, self.studio_hierarchy.keys())
-                if is_shielded else transform_node
-            )
+            move_target = transform_node
+            if is_shielded:
+                # skeleton-anchored root when there is one, the old top-level
+                # climb when there isn't (blendShape-only, sims)
+                move_target = (
+                    HierarchyManager.find_rig_root(transform_node, self.studio_hierarchy.keys(), memo=rig_roots)
+                    or HierarchyManager.get_root_ancestor(transform_node, self.studio_hierarchy.keys())
+                )
 
             # if the root-ancestor walk couldn't get past a reserved folder at
             # all, this "asset" IS one of our own sort folders - nothing to do

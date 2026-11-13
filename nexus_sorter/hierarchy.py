@@ -71,6 +71,122 @@ class HierarchyManager:
         return "|" + "|".join(parts[:depth + 1])
 
     @classmethod
+    def find_rig_root(
+        cls,
+        node_name: str,
+        reserved_names: Iterable[str] | None = None,
+        memo: dict | None = None,
+    ) -> str | None:
+        """smallest group that holds this mesh's whole rig and nothing else,
+        or None when there's no skeleton to anchor on (caller falls back to
+        get_root_ancestor, same as before this existed).
+
+        get_root_ancestor alone assumes every rig is its own top-level
+        group. put a character under |LEVEL and one skinned mesh dragged
+        the whole level into characters.
+
+        starts at the lowest common ancestor of the mesh and its joints,
+        which always holds both, then climbs only while the next group up
+        holds nothing but this rig. controls, helper joints and proxy geo
+        driven by our joints count as ours. any other mesh means stop.
+        splitting a rig apart is worse than the bug this fixes, so anything
+        unclear goes the old way instead of guessing."""
+        reserved = set(reserved_names or ())
+        node_long = (cmds.ls(node_name, long=True) or [node_name])[0]
+        joints = cls._rig_joints(node_long)
+        if not joints:
+            return None
+
+        start = cls._common_ancestor([node_long, *joints])
+        # no shared group (skeleton in a different top-level group), or the
+        # only thing they share is one of our own sort folders
+        if start is None or (start.count('|') == 1 and start.strip('|') in reserved):
+            return None
+
+        key = (start, frozenset(joints))
+        if memo is not None and key in memo:
+            return memo[key]
+
+        current = start
+        while True:
+            parent = cmds.listRelatives(current, parent=True, fullPath=True)
+            if not parent:
+                break
+            parent = parent[0]
+            if parent.count('|') == 1 and parent.strip('|') in reserved:
+                break
+            if cls._holds_other_assets(parent, current, joints):
+                break
+            current = parent
+
+        if memo is not None:
+            memo[key] = current
+        return current
+
+    @classmethod
+    def _rig_joints(cls, node_long: str) -> set[str]:
+        joints = set(cmds.ls(node_long, type='joint', long=True) or [])
+        joints.update(cmds.listRelatives(node_long, allDescendents=True, type='joint', fullPath=True) or [])
+        shapes = cmds.listRelatives(node_long, shapes=True, fullPath=True, noIntermediate=True) or []
+        joints.update(cls._skin_influences(shapes))
+        return joints
+
+    @staticmethod
+    def _skin_influences(shapes: list[str]) -> set[str]:
+        # same single-hop upstream check the anatomy scan uses, skinCluster
+        # feeds the shape's inMesh directly. no listHistory walk
+        if not shapes:
+            return set()
+        upstream = cmds.listConnections(shapes, source=True, destination=False) or []
+        influences = set()
+        for skin in set(cmds.ls(upstream, type='skinCluster') or []):
+            influences.update(cmds.ls(cmds.skinCluster(skin, query=True, influence=True) or [],
+                                      type='joint', long=True) or [])
+        return influences
+
+    @staticmethod
+    def _common_ancestor(paths: list[str]) -> str | None:
+        split = [[p for p in path.split('|') if p] for path in paths]
+        common = []
+        for parts in zip(*split):
+            if len(set(parts)) != 1:
+                break
+            common.append(parts[0])
+        return "|" + "|".join(common) if common else None
+
+    @classmethod
+    def _holds_other_assets(cls, parent: str, current: str, joints: set[str]) -> bool:
+        """true if parent holds a mesh that isn't part of this rig. stray
+        joints don't count on their own, rigs carry IK chains and helper
+        joints that never skin anything."""
+        candidates = list(cmds.listRelatives(parent, shapes=True, fullPath=True) or [])
+        for child in cmds.listRelatives(parent, children=True, fullPath=True) or []:
+            if child == current or child in candidates:
+                continue
+            candidates.extend(cmds.listRelatives(child, allDescendents=True, type='mesh', fullPath=True) or [])
+
+        for mesh in cmds.ls(candidates, type='mesh', noIntermediate=True, long=True) or []:
+            if cls._skin_influences([mesh]) & joints:
+                continue
+            owner = (cmds.listRelatives(mesh, parent=True, fullPath=True) or [mesh])[0]
+            if cls._driven_by_joints(owner, joints):
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _driven_by_joints(transform: str, joints: set[str]) -> bool:
+        """proxy geo and mesh-shaped controls ride the rig through a
+        constraint or a matrix connection instead of a skin. one or two hops
+        upstream catches constraints (joint -> constraint -> transform) and
+        offsetParentMatrix setups (joint -> multMatrix -> transform)."""
+        sources = cmds.listConnections(transform, source=True, destination=False) or []
+        if set(cmds.ls(sources, type='joint', long=True) or []) & joints:
+            return True
+        upstream = cmds.listConnections(sources, source=True, destination=False) or [] if sources else []
+        return bool(set(cmds.ls(upstream, type='joint', long=True) or []) & joints)
+
+    @classmethod
     def is_node_locked_or_referenced(cls, node_name: str) -> bool:
         try:
             if cmds.referenceQuery(node_name, isNodeReferenced=True): return True
