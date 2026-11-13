@@ -307,6 +307,7 @@ class CategorizationEngine:
         stylized, rock), then drops the numbers and v01 tags so they don't
         pollute the category match. same splitting derive_proposed_name
         uses, so what the name reads as and what it gets renamed to agree."""
+        short_name = cls._readable_fbx_name(short_name)
         spaced = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', short_name)
         tokens = []
         for raw in (t for t in spaced.split('_') if t):
@@ -490,14 +491,40 @@ class CategorizationEngine:
         best_dest = max(scores, key=scores.get)
         return best_dest, cls._confidence_from_score(scores[best_dest]), needs_shield
 
+    # FBX can't store some characters in names, so it writes them as
+    # FBXASC + the 3 digit ascii code. Blender's "Mesh.001" comes through as
+    # MeshFBXASC046001, a name starting with 7 as FBXASC055...
+    _FBX_ESCAPE_RE = re.compile(r'FBXASC(\d{3})')
+
+    @classmethod
+    def _readable_fbx_name(cls, name: str) -> str:
+        """decodes FBXASC escapes, then turns whatever maya won't take in a
+        name (spaces, dots, colons) into underscores. printable ascii only,
+        anything else stays encoded rather than guessing."""
+        def decode(match: re.Match) -> str:
+            code = int(match.group(1))
+            return chr(code) if 32 <= code < 127 else match.group(0)
+
+        decoded = cls._FBX_ESCAPE_RE.sub(decode, name)
+        return re.sub(r'[^a-zA-Z0-9_]', '_', decoded) if decoded != name else name
+
     @staticmethod
-    def sanitize_name_strict(short_name: str) -> str:
+    def _strip_illegal(short_name: str) -> str:
         clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', short_name)
         clean_name = re.sub(r'_+', '_', clean_name).strip('_')
         # if the name was nothing but junk characters we'd hand maya an empty
         # string here, and rename() just errors out on that - keep the original
         # instead of pretending we cleaned it
         return clean_name or short_name
+
+    @classmethod
+    def sanitize_name_strict(cls, short_name: str) -> str:
+        # rig roots get no prefix, so a decoded "7_shirt" would be an illegal
+        # maya name on its own. keep the FBX spelling over handing maya junk
+        readable = cls._strip_illegal(cls._readable_fbx_name(short_name))
+        if readable and not readable[0].isdigit():
+            return readable
+        return cls._strip_illegal(short_name)
 
     @classmethod
     def _destination_to_prefix(cls, destination: str) -> str:
@@ -639,6 +666,14 @@ class CategorizationEngine:
         fused tokens -> strip junk/stutter words -> collapse repeats ->
         THEN reformat the variant tag. collapsing has to happen before
         the tag reformat or a duplicated digit gets counted twice."""
+        readable = cls._readable_fbx_name(short_name)
+        if readable != short_name:
+            # same digit-first problem as sanitize_name_strict, matters for
+            # unassigned stuff that never gets a prefix in front of it
+            proposed = cls.derive_proposed_name(readable, destination)
+            if not proposed[:1].isdigit():
+                return proposed
+
         spaced = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', short_name)
         raw_tokens = [t for t in spaced.split('_') if t]
 
