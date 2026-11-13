@@ -1,8 +1,17 @@
 from __future__ import annotations
 
-from typing import Optional, TypedDict
+from typing import Optional
 
-from .categorization import Confidence, AssignmentSource
+try:
+    from typing import TypedDict
+except ImportError:
+    # Maya 2022 runs Python 3.7, TypedDict landed in 3.8. these classes
+    # are annotation-only, so a dict subclass that accepts total= is enough
+    class TypedDict(dict):
+        def __init_subclass__(cls, total: bool = True, **kwargs) -> None:
+            super().__init_subclass__(**kwargs)
+
+from .categorization import AssignmentSource, Confidence
 
 
 class _PlanItemRequired(TypedDict):

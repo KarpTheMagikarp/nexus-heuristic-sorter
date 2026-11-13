@@ -165,9 +165,6 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         # lets Override double as a bulk-reassign shortcut for whatever
         # the current scope considers in play, not just a pre-Analyze setting
         self.force_combo.currentIndexChanged.connect(self._on_force_override_changed)
-        # lets Override double as a bulk-reassign shortcut for whatever's
-        # currently checked, not just a pre-Analyze setting
-        self.force_combo.currentIndexChanged.connect(self._on_force_override_changed)
 
         top_layout.addWidget(QtWidgets.QLabel("Scope:"))
         top_layout.addWidget(self.scope_combo)
@@ -513,7 +510,9 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
             action.triggered.connect(
                 lambda checked, it=item, d=data, f=folder_name: self._reassign_destination_for_selection(it, d, f)
             )
-        menu.exec(self.preview_tree.viewport().mapToGlobal(pos))
+        # PySide2 (Maya 2022-2024) only has exec_, PySide6 renamed it to exec
+        run_menu = getattr(menu, "exec", None) or menu.exec_
+        run_menu(self.preview_tree.viewport().mapToGlobal(pos))
 
     def _reassign_destination_for_selection(
         self,
@@ -1080,7 +1079,10 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
                 continue
             targets.update(cmds.listRelatives(node, shapes=True, fullPath=True) or [])
 
-        targets = list(targets)
+        # sorted, not list(set). string hashing is randomized per Maya
+        # session, so set order was deciding which duplicate got the _02
+        # suffix and the order commit moved things in
+        targets = sorted(targets)
         if not targets:
             self._set_feedback("No valid assets found in the current scope.", self.COLOR_WARN)
             self.statusBar().showMessage("Nothing to sort.")
@@ -1500,6 +1502,9 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
                 summary = f"Sorted {result['count']} assets."
                 if result.get("cancelled"):
                     summary += " (cancelled partway through)"
+                move_failed = result.get("move_failed") or []
+                if move_failed:
+                    summary += f" {len(move_failed)} couldn't be moved (see script editor)."
                 if excluded_count:
                     summary += f" {excluded_count} left unchecked, not sorted."
                 if override_count:
@@ -1544,7 +1549,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
 
                 # green if it went clean, amber if there's something worth a second look -
                 # still a success either way, just different levels of "you're done"
-                tone = self.COLOR_WARN if (fallback_count or skipped_count or all_flagged or
+                tone = self.COLOR_WARN if (fallback_count or skipped_count or all_flagged or move_failed or
                                             result.get("freeze_failed") or
                                             (not self.freeze_checkbox.isChecked() and unfrozen_count) or
                                             result.get("cancelled")) else self.COLOR_GOOD

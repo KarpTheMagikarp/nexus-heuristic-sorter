@@ -1,4 +1,4 @@
-﻿"""
+"""
 single place this package figures out which Qt binding is actually
 available, so main_window.py and delegates.py don't each have to guess
 independently and risk landing on two different ones.

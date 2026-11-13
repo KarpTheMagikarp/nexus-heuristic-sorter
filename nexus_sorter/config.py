@@ -38,7 +38,9 @@ def _load_nexus_config() -> dict[str, Any]:
     config_path = os.path.join(base_dir, "nexus_config.json")
 
     try:
-        with open(config_path, "r") as f:
+        # utf-8-sig eats the BOM Notepad and some IDEs add, without an
+        # explicit encoding Windows reads this as cp1252 and the parse fails
+        with open(config_path, "r", encoding="utf-8-sig") as f:
             loaded = json.load(f)
         if not isinstance(loaded, dict):
             raise ValueError("nexus_config.json has to be a JSON object at the top level")

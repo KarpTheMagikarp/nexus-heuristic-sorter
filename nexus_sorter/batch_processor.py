@@ -218,9 +218,25 @@ class NexusBatchProcessor:
         only runs inside the creation branch, no reason to redo it every commit"""
         group_path = f"|{cls.DEPRECATED_HOLDING_GROUP}"
         if not cmds.objExists(group_path):
-            cmds.createNode('transform', name=cls.DEPRECATED_HOLDING_GROUP)
-            cls._stamp_quarantine_root(group_path)
+            created = cls._create_root_group(cls.DEPRECATED_HOLDING_GROUP)
+            cls._stamp_quarantine_root(created)
         return group_path
+
+    @staticmethod
+    def _create_root_group(name: str) -> str:
+        """createNode quietly hands back name1 if something already owns
+        the name (a set or display layer counts). every move after this
+        targets |name by string, so a silent rename means every parent()
+        aims at a folder that doesn't exist. bail loudly instead."""
+        created = cmds.createNode('transform', name=name)
+        if created != name:
+            cmds.delete(created)
+            raise RuntimeError(
+                f"Couldn't create '{name}' at the scene root, Maya renamed it to "
+                f"'{created}'. Something else in the scene is already named '{name}', "
+                f"rename it and try again."
+            )
+        return f"|{name}"
 
     @classmethod
     def _stamp_quarantine_root(cls, group_path: str) -> None:
@@ -461,7 +477,7 @@ class NexusBatchProcessor:
         quarantine_folder_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         payload = {"status": "pending", "count": 0, "objects": [], "message": "", "cancelled": False,
-                   "frozen": 0, "freeze_failed": 0}
+                   "frozen": 0, "freeze_failed": 0, "move_failed": []}
         quarantine_folder_paths = quarantine_folder_paths or []
         total_items = len(plan_data)
         if total_items == 0 and not quarantine_folder_paths:
@@ -513,10 +529,17 @@ class NexusBatchProcessor:
                     if cmds.listRelatives(f"|{g}", children=True)
                 }
 
-                for master_group in self.studio_hierarchy:
-                    if master_group not in pre_existing_groups:
-                        cmds.createNode('transform', name=master_group)
-                        groups_created_this_run.add(master_group)
+                try:
+                    for master_group in self.studio_hierarchy:
+                        if master_group not in pre_existing_groups:
+                            self._create_root_group(master_group)
+                            groups_created_this_run.add(master_group)
+                except RuntimeError:
+                    # nothing's moved yet, so tidy up the empty ones we
+                    # made and let the outer handler report it
+                    for group in groups_created_this_run:
+                        cmds.delete(f"|{group}")
+                    raise
 
                 moved_objects = []
                 for i, item in enumerate(plan_data):
@@ -565,6 +588,10 @@ class NexusBatchProcessor:
                             if parented: current_long_path = cmds.ls(parented[0], long=True)[0]
                         except RuntimeError as e:
                             logger.warning(f"Failed to parent {current_long_path}: {e}")
+                            # used to fall through and count as sorted, so the
+                            # summary claimed moves that never happened
+                            payload["move_failed"].append(current_long_path)
+                            continue
 
                     moved_objects.append(current_long_path)
 

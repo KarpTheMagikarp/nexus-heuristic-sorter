@@ -33,7 +33,9 @@ def unlocked_scene():
     cmds.reset_mock(side_effect=True, return_value=True)
     cmds.progressWindow.side_effect = _progress_window_dispatch
     cmds.objExists.return_value = False
-    cmds.createNode.return_value = "GRP_02_PROPS"
+    # echoes the requested name back like real maya does when it's free,
+    # a fixed return value would now trip the rename-collision guard
+    cmds.createNode.side_effect = lambda _type, name=None, **_kw: name
     cmds.listRelatives.return_value = []
     cmds.rename.return_value = "|GRP_02_PROPS|Pr_cart"
     cmds.parent.return_value = ["Pr_cart"]
