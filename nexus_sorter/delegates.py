@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 class DestinationDelegate(QtWidgets.QStyledItemDelegate):
     """destination column delegate. fakes a per-row combobox (arrow +
     dropdown) without actually paying for setItemWidget on a tree that
-    can have thousands of rows. only opens on a click on the arrow zone,
+    can have thousands of rows. only opens on a click on the word or arrow,
     not the default edit trigger (tree runs NoEditTriggers on purpose).
 
     paint() draws the text and arrow itself using cell_zones() below,
@@ -89,12 +89,12 @@ class DestinationDelegate(QtWidgets.QStyledItemDelegate):
             item, _data = self._editable_row(index)
             if item is not None:
                 plain_text = item.text(index.column())
-                _text_rect, arrow_rect = self.cell_zones(option.rect, option.font, plain_text)
+                text_rect, arrow_rect = self.cell_zones(option.rect, option.font, plain_text)
                 try:
                     click_pos = event.position().toPoint()
                 except AttributeError:
                     click_pos = event.pos()
-                if arrow_rect.contains(click_pos):
+                if self.hit_zone(text_rect, arrow_rect).contains(click_pos):
                     self._ui.preview_tree.editItem(item, index.column())
                     return True
         return super().editorEvent(event, model, option, index)
@@ -114,9 +114,19 @@ class DestinationDelegate(QtWidgets.QStyledItemDelegate):
         text_rect = QtCore.QRect(cell_rect.left() + left_margin, cell_rect.top(),
                                   text_width, cell_rect.height())
         arrow_left = text_rect.right() + gap
-        arrow_rect = QtCore.QRect(arrow_left, cell_rect.top(),
-                                   max(cell_rect.right() - arrow_left + 1, 0), cell_rect.height())
+        # glyph width only, clipped to the cell. this used to run to the
+        # cell's right edge, and destination is the stretch column, so a
+        # click anywhere in the empty space past the arrow opened the menu
+        arrow_width = min(metrics.horizontalAdvance(DestinationDelegate.ARROW_GLYPH),
+                          max(cell_rect.right() - arrow_left + 1, 0))
+        arrow_rect = QtCore.QRect(arrow_left, cell_rect.top(), arrow_width, cell_rect.height())
         return text_rect, arrow_rect
+
+    @staticmethod
+    def hit_zone(text_rect: QtCore.QRect, arrow_rect: QtCore.QRect) -> QtCore.QRect:
+        # word + arrow reads as one combo box, so clicking either opens it.
+        # couple px of slop on the ends so the arrow isn't a pixel hunt
+        return text_rect.united(arrow_rect).adjusted(-2, 0, 3, 0)
 
     def paint(
         self,
