@@ -181,3 +181,33 @@ def test_renamed_root_group_aborts_before_moving_anything(clean_engine_scene):
     cmds.parent.assert_not_called()
     deleted = {c.args[0] for c in cmds.delete.call_args_list}
     assert {"GRP_02_PROPS1", "|GRP_01_CHARACTERS"} <= deleted  # cleaned up the empty ones it made
+
+
+def test_full_drop_installs_and_evicts_itself(tmp_path, monkeypatch):
+    """the second WinError 5 report wasn't the new code failing, it was
+    Maya 2022+ running the cached OLD installer from an earlier drop in
+    the same session. after a drop the module has to be gone so the next
+    drag imports whatever file was actually dragged in."""
+    cmds.reset_mock(side_effect=True, return_value=True)
+    cmds.shelfLayout.return_value = []
+    monkeypatch.setattr(installer, "default_install_roots", lambda: [str(tmp_path / "scripts")])
+    monkeypatch.setattr(installer, "_forget_old_modules", lambda: None)  # other tests hold these modules
+    monkeypatch.setitem(sys.modules, installer.__name__, installer)
+
+    installer.onMayaDroppedPythonFile(None)
+
+    assert installer.__name__ not in sys.modules
+    assert (tmp_path / "scripts" / "nexus_sorter" / "__init__.py").exists()
+    assert not (tmp_path / "scripts" / "nexus_sorter" / "main_window.py.bak").exists()
+    shelf_cmd = cmds.shelfButton.call_args.kwargs["command"]
+    assert repr(str(tmp_path / "scripts")) in shelf_cmd
+    assert cmds.confirmDialog.call_args.kwargs["title"] == "Nexus Sorter"  # success dialog, not the failure one
+
+
+def test_drop_evicts_itself_even_when_install_blows_up(monkeypatch):
+    monkeypatch.setitem(sys.modules, installer.__name__, installer)
+    monkeypatch.setattr(installer, "_run_install", lambda: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        installer.onMayaDroppedPythonFile(None)
+    assert installer.__name__ not in sys.modules

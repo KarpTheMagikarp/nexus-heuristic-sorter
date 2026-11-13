@@ -34,6 +34,8 @@ No restart needed. Dragging it in again updates an existing install.
 
 **"Access is denied" / WinError 5 during install.** Your Documents folder is probably synced by OneDrive or protected by Windows Security's *Controlled folder access*. The installer falls back to `%LOCALAPPDATA%\NexusSorter` on its own and tells you when it did. If both locations are blocked, pause OneDrive sync or allow `maya.exe` under *Controlled folder access*, then drag the installer in again.
 
+**Still getting the same install error after updating.** Maya 2022 and newer cache a dropped script for the rest of the session, so dragging in a new installer can quietly run an older one you dropped earlier. Restart Maya once and drag the new installer in again. Current installers clear themselves from that cache, so this only bites when upgrading from an older one.
+
 **The shelf button is missing.** Drag the installer in again. It replaces the button rather than duplicating it.
 
 ## Running the tests

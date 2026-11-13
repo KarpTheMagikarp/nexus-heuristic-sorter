@@ -43,7 +43,19 @@ class InstallError(Exception):
 
 def onMayaDroppedPythonFile(_obj):
     """required entry point, signature has to match exactly or Maya
-    won't call it at all."""
+    won't call it at all.
+
+    Maya 2022+ caches a dropped script by module name and never reloads
+    it, so dragging in a newer installer in the same session silently
+    runs the OLD one. evicting ourselves on the way out means the next
+    drop always imports the file that was actually dragged in."""
+    try:
+        _run_install()
+    finally:
+        sys.modules.pop(__name__, None)
+
+
+def _run_install():
     try:
         source_dir = os.path.dirname(os.path.abspath(__file__))
         source_pkg = os.path.join(source_dir, _PACKAGE_NAME)
