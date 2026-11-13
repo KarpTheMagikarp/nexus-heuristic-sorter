@@ -103,17 +103,27 @@ class HierarchyManager:
 
     @classmethod
     def execute_safe_rename(cls, dag_path_str: str, new_name: str) -> str | None:
+        """cmds.rename, not an API MDagModifier. API edits made outside a
+        command plugin never hit Maya's undo queue, so ctrl+z after a sort
+        put the hierarchy back but left every new name behind.
+
+        a bare new name lands in whatever namespace is CURRENT, not the
+        node's own, so the node's namespace gets passed back explicitly as
+        an absolute path. ignoreShape keeps shapes untouched like before.
+        rename can tack digits on to dodge a clash, so the real result
+        comes back by uuid instead of trusting new_name."""
         if cls.is_node_locked_or_referenced(dag_path_str):
             logger.warning(f"Skipping locked/referenced node: {dag_path_str}")
             return None
-        dag_path = cls.get_dag_path(dag_path_str)
-        if not dag_path: return None
 
         try:
-            mod = om.MDagModifier()
-            mod.renameNode(dag_path.node(), new_name)
-            mod.doIt()
-            return om.MFnDagNode(dag_path.node()).fullPathName()
+            uuid = cmds.ls(dag_path_str, uuid=True)
+            if not uuid:
+                return None
+            namespace = dag_path_str.rsplit('|', 1)[-1].rpartition(':')[0]
+            cmds.rename(dag_path_str, f":{namespace}:{new_name}" if namespace else f":{new_name}", ignoreShape=True)
+            renamed = cmds.ls(uuid[0], long=True)
+            return renamed[0] if renamed else None
         except RuntimeError as err:
             logger.error(f"Rename failed on {dag_path_str}: {err}")
             return None
