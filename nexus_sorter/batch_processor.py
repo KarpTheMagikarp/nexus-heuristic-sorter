@@ -138,6 +138,14 @@ class NexusBatchProcessor:
 
             move_short_name = HierarchyManager.get_safe_short_name(move_target)
 
+            # a forced override from the toolbar still beats memory, that's
+            # the artist's call right now vs their call from last time
+            if source == AssignmentSource.AUTO_DETECTED:
+                remembered = self._remembered_category(move_target)
+                if remembered:
+                    primary_dest, confidence = remembered, Confidence.HIGH
+                    source = AssignmentSource.REMEMBERED
+
             if is_shielded:
                 # rig's master group name, illegal chars only, no token surgery
                 name_deriver = CategorizationEngine.sanitize_name_strict
@@ -179,9 +187,47 @@ class NexusBatchProcessor:
     ATTR_QUARANTINE_ROOT = "nexus_quarantine_root"
     ATTR_QUARANTINED_DATE = "nexus_quarantined_date"
     ATTR_ASSET_CATEGORY = "nexus_asset_category"
+    # "user" or "auto", whether that category was a human call or ours
+    ATTR_CATEGORY_SOURCE = "nexus_category_source"
     # what _quarantine_safety_check checks a folder's attributes
     # against, see that method for why this exists at all
-    _OWN_ATTRS = frozenset({ATTR_QUARANTINE_ROOT, ATTR_QUARANTINED_DATE, ATTR_ASSET_CATEGORY})
+    _OWN_ATTRS = frozenset({ATTR_QUARANTINE_ROOT, ATTR_QUARANTINED_DATE, ATTR_ASSET_CATEGORY, ATTR_CATEGORY_SOURCE})
+
+    def _remembered_category(self, node: str) -> str | None:
+        """a human decision from a previous run, or None to auto-detect.
+
+        1. sitting directly in one of our category folders that ISN'T what
+           we stamped (or with no stamp at all) means someone put it there
+           by hand. their move wins, re-sorting would just undo it.
+        2. stamped from a manual override last commit, keep it. fixing a
+           row once should stick.
+        3. our own auto pick from last time gets re-detected on purpose,
+           so better detection can fix an older wrong guess instead of
+           locking it in forever.
+
+        UNASSIGNED_ASSETS never counts as a decision, it's where the tool
+        parks things it couldn't place."""
+        real_folders = set(self.studio_hierarchy) - {"UNASSIGNED_ASSETS"}
+        try:
+            parent = cmds.listRelatives(node, parent=True, fullPath=True)
+            folder = parent[0].lstrip('|') if parent else None
+            stamped = self._read_string_attr(node, self.ATTR_ASSET_CATEGORY)
+            stamp_source = self._read_string_attr(node, self.ATTR_CATEGORY_SOURCE)
+        except RuntimeError:
+            return None
+
+        if folder in real_folders and stamped != folder:
+            return folder
+        if stamped in real_folders and stamp_source == "user":
+            return stamped
+        return None
+
+    @staticmethod
+    def _read_string_attr(node: str, attr: str) -> str | None:
+        if not cmds.attributeQuery(attr, node=node, exists=True):
+            return None
+        value = cmds.getAttr(f"{node}.{attr}")
+        return value if isinstance(value, str) and value else None
 
     # fallback only, used when nexus_config.json has no
     # purge_age_threshold_days key or the value there isn't usable.
@@ -573,10 +619,15 @@ class NexusBatchProcessor:
                         renamed_path = HierarchyManager.execute_safe_rename(current_long_path, clean_name)
                         if renamed_path: current_long_path = renamed_path
 
+                    is_human_call = item.get("source") in (AssignmentSource.USER_FORCED, AssignmentSource.REMEMBERED)
                     try:
-                        if not cmds.attributeQuery(self.ATTR_ASSET_CATEGORY, node=current_long_path, exists=True):
-                            cmds.addAttr(current_long_path, longName=self.ATTR_ASSET_CATEGORY, dataType='string')
-                        cmds.setAttr(f"{current_long_path}.{self.ATTR_ASSET_CATEGORY}", item['destination'], type='string')
+                        for attr, value in (
+                            (self.ATTR_ASSET_CATEGORY, item['destination']),
+                            (self.ATTR_CATEGORY_SOURCE, "user" if is_human_call else "auto"),
+                        ):
+                            if not cmds.attributeQuery(attr, node=current_long_path, exists=True):
+                                cmds.addAttr(current_long_path, longName=attr, dataType='string')
+                            cmds.setAttr(f"{current_long_path}.{attr}", value, type='string')
                     except RuntimeError as e:
                         logger.warning(f"Could not add metadata to {current_long_path}: {e}")
 

@@ -692,7 +692,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         # reassignment can move a row into or out of a freeze-blocked
         # category, and without this a formerly amber row could keep
         # showing stale amber even after its status text correctly
-        # flips to "Ready (Rig Shielded)"
+        # flips to "Ready"
         self._apply_freeze_status_style(item, data)
         # destination only, not the whole row - that's the actual thing
         # that changed, coloring all 4 columns buried the real signal
@@ -701,18 +701,20 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Staged {data['original']} → {folder_name} as {data['proposed']}.")
 
     def _status_text_for(self, data: PlanItem) -> str:
+        # only claims a shield when one's actually on. used to say "Rig
+        # Shielded" for anything in characters/vfx, shield or not.
+        # shielded stuff never gets frozen, so Needs Freeze would be a lie
+        if data.get("is_shielded"):
+            return "Ready · Rig Shield"
         # characters/vfx never show Needs Freeze, baking those breaks rigs
         if CategorizationEngine.is_freeze_blocked(data["destination"]):
-            return "Ready (Rig Shielded)"
+            return "Ready"
         # checking "freeze on commit" resolves an unfrozen transform
         # automatically at commit time (see execute_commit's
         # freeze_eligible pass-through) - showing amber "Needs Freeze"
         # here anyway would be flagging a problem the tool's already
         # been told to go fix by itself
-        text = "Ready" if (data["is_frozen"] or self.freeze_checkbox.isChecked()) else "Needs Freeze"
-        if data.get("is_shielded"):
-            text += " · Rig Shield"
-        return text
+        return "Ready" if (data["is_frozen"] or self.freeze_checkbox.isChecked()) else "Needs Freeze"
 
     def _apply_freeze_status_style(self, item: QtWidgets.QTreeWidgetItem, data: PlanItem) -> None:
         """(re)applies the Ready-vs-Needs-Freeze text and coloring for one
@@ -1468,7 +1470,8 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
                 override_count = sum(1 for d in plan if d["source"] == AssignmentSource.USER_FORCED)
                 unfrozen_count = sum(
                     1 for d in plan
-                    if not d["is_frozen"] and not CategorizationEngine.is_freeze_blocked(d["destination"])
+                    if not d["is_frozen"] and not d.get("is_shielded")
+                    and not CategorizationEngine.is_freeze_blocked(d["destination"])
                 )
 
                 result = self.engine.execute_sorting_pass(

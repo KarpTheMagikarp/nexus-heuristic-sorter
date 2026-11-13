@@ -25,6 +25,9 @@ class AssignmentSource(enum.Enum):
     override isn't a confidence level, it's a totally different thing."""
     AUTO_DETECTED = "Auto-Detected"
     USER_FORCED = "User Override"
+    # an earlier human decision read back off the scene, see
+    # NexusBatchProcessor._remembered_category
+    REMEMBERED = "Remembered"
     SKIPPED_REFERENCED = "Skipped (Referenced)"
 
 
@@ -42,22 +45,33 @@ class CategorizationEngine:
         "LT_": "GRP_05_LIGHTING",
     }
 
-    # matched against whole tokens not substrings so "LIGHT" doesn't light up on "LIGHTHOUSE"
+    # matched against whole tokens not substrings so "LIGHT" doesn't light up on "LIGHTHOUSE".
+    # no "rig" for characters on purpose: joints already prove something's rigged,
+    # and the word alone was dragging camera_rig/light_rig into characters
     _CATEGORY_SYNONYMS = {
         "GRP_01_CHARACTERS": {
             "char", "character", "characters", "hero", "npc", "creature",
-            "enemy", "actor", "avatar", "rig",
+            "enemy", "actor", "avatar", "monster", "boss", "humanoid",
+            "biped", "quadruped",
         },
         "GRP_02_PROPS": {
             "prop", "props", "item", "items", "weapon", "sword", "chair",
             "table", "barrel", "crate", "box", "tool", "gadget", "device",
-            "furniture",
+            "furniture", "cauldron", "stool", "bench", "shelf", "shield",
+            "shields", "axe", "spear", "bow", "bottle", "jar", "vase", "pot",
+            "bucket", "basket", "book", "books", "cup", "mug", "plate",
+            "bowl", "rope", "chain",
         },
         "GRP_03_ENVIRONMENT": {
             "env", "environment", "set", "terrain", "ground", "rock",
             "rocks", "boulder", "cliff", "mountain", "tree", "trees",
             "foliage", "plant", "plants", "building", "structure", "wall",
-            "floor", "kit", "module", "landscape",
+            "floor", "kit", "module", "landscape", "pillar", "pillars",
+            "column", "columns", "arch", "archway", "doorway", "stairs",
+            "staircase", "bridge", "fence", "roof", "ceiling", "beam",
+            "beams", "ruin", "ruins", "statue", "tapestry", "tapestries",
+            "banner", "banners", "flag", "flags", "curtain", "curtains",
+            "drape", "drapes", "rug", "carpet",
         },
         "GRP_04_VFX": {
             "fx", "vfx", "particle", "particles", "smoke", "fire",
@@ -67,6 +81,10 @@ class CategorizationEngine:
             "light", "lights", "lgt", "lamp", "sun", "sky", "bulb",
         },
     }
+
+    # catch-all words that show up across categories ("table_set", "rock_kit").
+    # half weight, so they can break a tie but never create one
+    _WEAK_WORDS = frozenset({"set", "kit", "module", "structure", "item", "items", "tool", "device", "gadget"})
 
     # descriptor words that don't say what the asset actually is, safe to
     # strip. "stylized" is NOT junk though, it's a real style tag, kept
@@ -78,10 +96,6 @@ class CategorizationEngine:
     # kept but not tracked as junk, used by _segment_fused_token
     _PRESERVED_DESCRIPTORS = frozenset({"stylized"})
 
-    # derived union so nothing here needs manual updates when a synonym gets added
-    _KNOWN_VOCABULARY = frozenset().union(
-        *_CATEGORY_SYNONYMS.values(), _JUNK_DESCRIPTORS, _PRESERVED_DESCRIPTORS
-    )
 
     # just the literal category labels, would stutter against the prefix
     # (unlike the broader synonym bank above, "rock" needs to survive)
@@ -134,6 +148,43 @@ class CategorizationEngine:
     LOW = Confidence.LOW
 
     _prefix_map = None
+    _synonyms = None
+    _vocabulary = None
+
+    @classmethod
+    def get_category_synonyms(cls) -> dict[str, frozenset[str]]:
+        """built-in words plus whatever nexus_config.json's
+        category_keywords adds. extends, never replaces, so a studio
+        config can't accidentally wipe out the defaults. unknown folders
+        get dropped with a warning since nothing would create them."""
+        if cls._synonyms is not None:
+            return cls._synonyms
+
+        merged = {dest: set(words) for dest, words in cls._CATEGORY_SYNONYMS.items()}
+        extra = _load_nexus_config().get("category_keywords") or {}
+        if not isinstance(extra, dict):
+            logger.warning("nexus_config.json's category_keywords should map a folder to a word list, ignoring it.")
+            extra = {}
+        for dest, words in extra.items():
+            if dest not in merged:
+                logger.warning(f"category_keywords has unknown folder {dest!r}, ignoring it.")
+                continue
+            if isinstance(words, str) or not all(isinstance(w, str) for w in words or []):
+                logger.warning(f"category_keywords[{dest!r}] should be a list of words, ignoring it.")
+                continue
+            merged[dest].update(w.lower() for w in words)
+
+        cls._synonyms = {dest: frozenset(words) for dest, words in merged.items()}
+        return cls._synonyms
+
+    @classmethod
+    def _known_vocabulary(cls) -> frozenset[str]:
+        # derived from the merged synonyms so config words segment too
+        if cls._vocabulary is None:
+            cls._vocabulary = frozenset().union(
+                *cls.get_category_synonyms().values(), cls._JUNK_DESCRIPTORS, cls._PRESERVED_DESCRIPTORS
+            )
+        return cls._vocabulary
 
     @classmethod
     def get_prefix_map(cls) -> dict[str, str]:
@@ -154,6 +205,8 @@ class CategorizationEngine:
         re-reads config. same reasoning as config.reset_config_cache,
         tests need this, production code doesn't."""
         cls._prefix_map = None
+        cls._synonyms = None
+        cls._vocabulary = None
 
     @classmethod
     def score_node_anatomy(cls, dag_path_str: str) -> tuple[dict[str, int], bool]:
@@ -247,48 +300,67 @@ class CategorizationEngine:
         except RuntimeError:
             return False
 
-    @staticmethod
-    def tokenize_asset_name(short_name: str) -> list[str]:
-        """splits on underscores and camelCase boundaries, then slices off
-        numbers and variation tags like v01 or 05 so they don't pollute the
-        category match."""
+    @classmethod
+    def tokenize_asset_name(cls, short_name: str) -> list[str]:
+        """splits on underscores and camelCase, peels trailing digits off
+        (Archway1 -> archway), splits fused known words (stylizedrock ->
+        stylized, rock), then drops the numbers and v01 tags so they don't
+        pollute the category match. same splitting derive_proposed_name
+        uses, so what the name reads as and what it gets renamed to agree."""
         spaced = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', short_name)
-        raw_tokens = [t for t in spaced.split('_') if t]
-
         tokens = []
-        for tok in raw_tokens:
-            if re.fullmatch(r'v?\d+', tok.lower()):
-                continue
-            tokens.append(tok)
+        for raw in (t for t in spaced.split('_') if t):
+            for piece in cls._isolate_trailing_digits(raw):
+                if cls._PURE_VARIANT_RE.match(piece):
+                    continue
+                tokens.extend(cls._segment_fused_token(piece))
         return tokens
 
     @classmethod
-    def score_name_tokens(cls, short_name: str) -> tuple[str | None, int]:
-        """(destination, score) based on the asset's actual naming tokens,
-        matched against real words instead of a raw substring search - a
-        studio prefix clears CONFIDENCE_HIGH_FLOOR outright, a loose
-        synonym match only gets medium territory."""
+    def _name_hits(cls, short_name: str) -> tuple[dict[str, float], bool]:
+        """({destination: weighted hits}, came_from_explicit_prefix). split
+        out so the rig check can pool hits across a whole path instead of
+        trusting one node's name."""
         upper_name = short_name.upper()
-        prefix_map = cls.get_prefix_map()
 
-        # an explicit studio prefix (CH_, PR_, ENV_...) still wins outright -
+        # an explicit studio prefix (CH_, PR_, ENV_...) still wins outright,
         # that's a deliberate naming convention, not a guess
-        prefix_hit = next((dest for prefix, dest in prefix_map.items() if upper_name.startswith(prefix)), None)
+        prefix_hit = next((dest for prefix, dest in cls.get_prefix_map().items() if upper_name.startswith(prefix)), None)
         if prefix_hit:
-            return prefix_hit, cls.SCORE_EXPLICIT_PREFIX
-
+            return {prefix_hit: 1}, True
         if upper_name.startswith(cls._COLLISION_PREFIXES):
-            return "GRP_03_ENVIRONMENT", cls.SCORE_EXPLICIT_PREFIX
+            return {"GRP_03_ENVIRONMENT": 1}, True
 
         tokens = {t.lower() for t in cls.tokenize_asset_name(short_name)}
-        if not tokens:
+        hits = {}
+        for dest, words in cls.get_category_synonyms().items():
+            matched = tokens & words
+            if matched:
+                hits[dest] = sum(0.5 if w in cls._WEAK_WORDS else 1.0 for w in matched)
+        return hits, False
+
+    @classmethod
+    def score_name_tokens(cls, short_name: str) -> tuple[str | None, int]:
+        """(destination, score) off the name's real words. a studio prefix
+        clears CONFIDENCE_HIGH_FLOOR outright, a synonym match only gets
+        medium territory.
+
+        most matching words wins. a tie means the name genuinely points two
+        ways (light_rig, table_set), so it returns nothing and lets
+        hierarchy context or manual review decide. the old version took
+        whichever category happened to be listed first, which is a coin
+        flip that looks confident."""
+        hits, explicit = cls._name_hits(short_name)
+        if not hits:
             return None, 0
+        if explicit:
+            return next(iter(hits)), cls.SCORE_EXPLICIT_PREFIX
 
-        for dest, synonyms in cls._CATEGORY_SYNONYMS.items():
-            if tokens & synonyms:
-                return dest, cls.SCORE_NAME_SYNONYM
-
-        return None, 0
+        best = max(hits.values())
+        leaders = [dest for dest, count in hits.items() if count == best]
+        if len(leaders) > 1:
+            return None, 0
+        return leaders[0], cls.SCORE_NAME_SYNONYM
 
     @classmethod
     def score_hierarchy_context(cls, dag_path_str: str) -> tuple[str | None, int]:
@@ -315,6 +387,49 @@ class CategorizationEngine:
                 return sib_dest, cls.SCORE_HIERARCHY_SIBLING
 
         return None, 0
+
+    @classmethod
+    def _path_names(cls, dag_path_str: str) -> list[str]:
+        """short names from the scene root down to this node, minus our own
+        sort folders. the rig root usually carries the real name
+        (BaseTapestry) while the skinned mesh under it is body_geo or
+        pCube12, so one node's name isn't enough to go on."""
+        long_paths = cmds.ls(dag_path_str, long=True) or [dag_path_str]
+        names = []
+        for part in long_paths[0].split('|'):
+            short = part.split(':')[-1]
+            if not short or short.startswith("GRP_") or short == "UNASSIGNED_ASSETS":
+                continue
+            names.append(short)
+        return names
+
+    @classmethod
+    def _category_for_rigged(cls, dag_path_str: str) -> tuple[str, Confidence]:
+        """a skeleton proves something's rigged, not that it's a character.
+        tapestries, flags, doors and chains all get joints too.
+
+        only leaves characters when the names along its path point at
+        exactly ONE other category and nothing in them says character.
+        tree_creature stays a character, a name pointing two ways stays a
+        character, no name signal at all stays a character. that's the old
+        behavior for every case except a clean, unambiguous name. the rig
+        shield stays on no matter where it lands, caller handles that."""
+        pooled: dict[str, float] = {}
+        explicit = set()
+        for name in cls._path_names(dag_path_str):
+            hits, from_prefix = cls._name_hits(name)
+            for dest, count in hits.items():
+                pooled[dest] = pooled.get(dest, 0) + count
+            if from_prefix:
+                explicit.update(hits)
+
+        if "GRP_01_CHARACTERS" in pooled or len(pooled) != 1:
+            return "GRP_01_CHARACTERS", cls.HIGH
+
+        dest = next(iter(pooled))
+        # a loose word match is medium even with joints, the joints vouch
+        # for "rigged", not for the word
+        return dest, (cls.HIGH if dest in explicit else cls.MEDIUM)
 
     @classmethod
     def _confidence_from_score(cls, score: int) -> Confidence:
@@ -355,7 +470,8 @@ class CategorizationEngine:
 
         scores, needs_shield = cls.score_node_anatomy(dag_path_str)
         if scores.get("GRP_01_CHARACTERS", 0) >= cls.SCORE_VETO:
-            return "GRP_01_CHARACTERS", cls.HIGH, True
+            dest, confidence = cls._category_for_rigged(dag_path_str)
+            return dest, confidence, True
 
         token_dest, token_score = cls.score_name_tokens(short_name)
         if token_dest:
@@ -436,7 +552,7 @@ class CategorizationEngine:
     @classmethod
     def _segment_fused_token(cls, token: str) -> list[str]:
         """tries to split one fused word into pieces from
-        _KNOWN_VOCABULARY, longest match first. only returns a split if it
+        the known vocabulary, longest match first. only returns a split if it
         found a FULL match all the way through, otherwise just gives back
         [token] unchanged - never guesses at a boundary the dictionary
         can't back up, so a real one-word name that's just not in the
@@ -453,7 +569,7 @@ class CategorizationEngine:
             # possible word ending at `end` - "environment" wins over
             # "en" + "vironment" whenever both would technically work
             for start in range(0, end):
-                if reachable[start] and low[start:end] in cls._KNOWN_VOCABULARY:
+                if reachable[start] and low[start:end] in cls._known_vocabulary():
                     reachable[end] = True
                     back[end] = start
                     break

@@ -30,6 +30,22 @@ No restart needed. Dragging it in again updates an existing install.
 
 `nexus_config.json` maps naming prefixes to folders and sets how long quarantined folders are kept before they can be purged. Delete it to run on the built-in defaults.
 
+To teach the sorter your studio's words, add them under `category_keywords`. These extend the built-in list, they don't replace it:
+
+```json
+"category_keywords": {
+  "GRP_03_ENVIRONMENT": ["door", "gate"],
+  "GRP_02_PROPS": ["lantern"]
+}
+```
+
+## How it decides
+
+1. **What the asset is.** Lights, sim shapes and skeletons are checked first. Anything with a skeleton or skinCluster is rig shielded: moved as one unit, never renamed internally, never frozen.
+2. **What it's called.** Studio prefixes like `CH_` win outright. Otherwise the folder with the most matching words wins. A rigged asset only leaves Characters when its name clearly says something else, like a rigged tapestry going to Environment.
+3. **When it can't tell, it asks.** A name that points two ways or nowhere goes to Manual Assignment instead of a guess.
+4. **It remembers you.** A manual reassignment, or an asset you dragged into a different category folder yourself, keeps that category on every later run.
+
 ## Troubleshooting
 
 **"Access is denied" / WinError 5 during install.** Your Documents folder is probably synced by OneDrive or protected by Windows Security's *Controlled folder access*. The installer falls back to `%LOCALAPPDATA%\NexusSorter` on its own and tells you when it did. If both locations are blocked, pause OneDrive sync or allow `maya.exe` under *Controlled folder access*, then drag the installer in again.
