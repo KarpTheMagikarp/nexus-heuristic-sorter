@@ -6,8 +6,10 @@ on:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    # pinned, ubuntu-latest moved to 26.04 which has no python 3.9 build
+    runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false  # one version failing to set up shouldn't cancel the rest
       matrix:
         python-version: ["3.9", "3.11"]
     steps:
