@@ -587,14 +587,15 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
             return
 
         reverted = 0
-        for it, d in targets:
-            if d.get("is_shielded"):
-                continue
-            if not cmds.objExists(d["long_path"]):
-                continue
-            dest, confidence, _needs_shield = CategorizationEngine.analyze_asset_dna(d["long_path"], d["original"])
-            self._reassign_destination(it, d, dest, source=AssignmentSource.AUTO_DETECTED, confidence=confidence)
-            reverted += 1
+        with CategorizationEngine.analysis_pass():
+            for it, d in targets:
+                if d.get("is_shielded"):
+                    continue
+                if not cmds.objExists(d["long_path"]):
+                    continue
+                dest, confidence, _needs_shield = CategorizationEngine.analyze_asset_dna(d["long_path"], d["original"])
+                self._reassign_destination(it, d, dest, source=AssignmentSource.AUTO_DETECTED, confidence=confidence)
+                reverted += 1
         self._column_resize_timer.start()
 
         self.statusBar().showMessage(f"Reverted {reverted} asset(s) to their auto-detected category.")
@@ -1072,19 +1073,12 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         # snapshot at this analyze click, never re-read later
         selected_paths = set(cmds.ls(sl=True, long=True) or []) if select_scope_active else set()
 
-        targets = set()
-        for node in pool:
-            # node might already be a shape - happens a lot with the "All Assets"
-            # query above, or if someone selected a shape directly in the outliner
-            if cmds.ls([node], type=["mesh", "light"]):
-                targets.add(node)
-                continue
-            targets.update(cmds.listRelatives(node, shapes=True, fullPath=True) or [])
-
+        # pool is already type-filtered to shapes, so no per-node re-check.
+        # that used to be one extra maya call per object for nothing.
         # sorted, not list(set). string hashing is randomized per Maya
         # session, so set order was deciding which duplicate got the _02
         # suffix and the order commit moved things in
-        targets = sorted(targets)
+        targets = sorted(set(pool))
         if not targets:
             self._set_feedback("No valid assets found in the current scope.", self.COLOR_WARN)
             self.statusBar().showMessage("Nothing to sort.")

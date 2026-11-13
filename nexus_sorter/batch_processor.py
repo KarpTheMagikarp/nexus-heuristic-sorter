@@ -80,13 +80,33 @@ class NexusBatchProcessor:
         return final_name
 
     def analyze_sorting_plan(self, target_shapes: list[str], force_category: str) -> dict[str, Any]:
+        with CategorizationEngine.analysis_pass():
+            return self._build_sorting_plan(target_shapes, force_category)
+
+    def _under_quarantine(self, path: str, checked_roots: dict[str, bool]) -> bool:
+        """anything inside the stamped holding group. checks the stamp, not
+        the name, same as the purge does, and caches per top-level group
+        so a 5k-object scene doesn't re-query the same root 5k times."""
+        top = path.lstrip('|').split('|', 1)[0]
+        if top not in checked_roots:
+            checked_roots[top] = self.is_quarantine_root(f"|{top}")
+        return checked_roots[top]
+
+    def _build_sorting_plan(self, target_shapes: list[str], force_category: str) -> dict[str, Any]:
         plan_data = {}
         seen_transforms = set()
         claimed_names = {}
+        checked_roots = {}
 
         for shape_path in target_shapes:
             root_parent = HierarchyManager.get_dag_path(shape_path)
             if not root_parent: continue
+
+            # quarantined means out of production. without this, the next
+            # Analyze collected everything inside and sorted it right back
+            # into the live folders, only the empty folder stayed put
+            if self._under_quarantine(shape_path, checked_roots):
+                continue
 
             transform_node = cmds.listRelatives(shape_path, parent=True, fullPath=True)
             if transform_node:

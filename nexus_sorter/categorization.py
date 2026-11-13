@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import re
 import enum
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, TypeVar
 
 import maya.cmds as cmds
 
 from .config import logger, _load_nexus_config
 from .hierarchy import HierarchyManager
+
+_T = TypeVar("_T")
 
 
 class Confidence(enum.Enum):
@@ -150,6 +153,30 @@ class CategorizationEngine:
     _prefix_map = None
     _synonyms = None
     _vocabulary = None
+    _pass_cache: dict | None = None
+
+    @classmethod
+    @contextmanager
+    def analysis_pass(cls) -> Iterator[None]:
+        """memoizes per-material and per-group answers for one Analyze.
+        without it every object re-walked its whole material's member list
+        and its whole sibling list, which is n^2 and locks Maya up on a
+        kit with thousands of pieces. scoped to the pass on purpose, the
+        scene can change between Analyze clicks so nothing outlives it."""
+        outer = cls._pass_cache
+        cls._pass_cache = {} if outer is None else outer
+        try:
+            yield
+        finally:
+            cls._pass_cache = outer
+
+    @classmethod
+    def _memo(cls, key: tuple, compute: Callable[[], _T]) -> _T:
+        if cls._pass_cache is None:
+            return compute()
+        if key not in cls._pass_cache:
+            cls._pass_cache[key] = compute()
+        return cls._pass_cache[key]
 
     @classmethod
     def get_category_synonyms(cls) -> dict[str, frozenset[str]]:
@@ -286,19 +313,20 @@ class CategorizationEngine:
             for sg in shading_engines:
                 if sg in ('initialShadingGroup', 'initialParticleSE'):
                     continue  # default maya groups, not a real signal either way
-
-                members = cmds.sets(sg, query=True) or []
-                owners = set()
-                for member in members:
-                    owner = cmds.listRelatives(member.split('.')[0], parent=True, fullPath=True)
-                    if owner:
-                        owners.add(owner[0])
-
-                if len(owners) > 2:
+                if cls._memo(("sg_owners", sg), lambda sg=sg: cls._count_material_owners(sg)) > 2:
                     return True
             return False
         except RuntimeError:
             return False
+
+    @staticmethod
+    def _count_material_owners(sg: str) -> int:
+        # one listRelatives for the whole member list instead of one per
+        # member, that per-member loop was the other half of the n^2
+        nodes = sorted({member.split('.')[0] for member in (cmds.sets(sg, query=True) or [])})
+        if not nodes:
+            return 0
+        return len(set(cmds.listRelatives(nodes, parent=True, fullPath=True) or []))
 
     @classmethod
     def tokenize_asset_name(cls, short_name: str) -> list[str]:
@@ -371,23 +399,38 @@ class CategorizationEngine:
         parent = cmds.listRelatives(dag_path_str, parent=True, fullPath=True)
         if not parent:
             return None, 0
+        group = parent[0]
 
-        parent_short = HierarchyManager.get_safe_short_name(parent[0])
-        dest, _ = cls.score_name_tokens(parent_short)
+        dest = cls._memo(
+            ("group_dest", group),
+            lambda: cls.score_name_tokens(HierarchyManager.get_safe_short_name(group))[0],
+        )
         if dest:
             return dest, cls.SCORE_HIERARCHY_PARENT
 
         # still nothing - see if a sibling already picked a lane. weak signal,
         # but on a real production scene it beats a coin flip
-        siblings = cmds.listRelatives(parent[0], children=True, fullPath=True) or []
-        for sib in siblings:
-            if sib == dag_path_str:
-                continue
-            sib_dest, _ = cls.score_name_tokens(HierarchyManager.get_safe_short_name(sib))
-            if sib_dest:
+        for sib, sib_dest in cls._memo(("sibling_dests", group), lambda: cls._first_resolving_children(group)):
+            if sib != dag_path_str:
                 return sib_dest, cls.SCORE_HIERARCHY_SIBLING
 
         return None, 0
+
+    @classmethod
+    def _first_resolving_children(cls, group: str) -> list[tuple[str, str]]:
+        """first two children whose name lands somewhere, in outliner order.
+        two, not one, so the caller can skip itself and still have an
+        answer. an asset only gets here when its own name resolved to
+        nothing, so it can't actually be one of these, two is just cheap
+        insurance."""
+        found = []
+        for child in cmds.listRelatives(group, children=True, fullPath=True) or []:
+            child_dest, _ = cls.score_name_tokens(HierarchyManager.get_safe_short_name(child))
+            if child_dest:
+                found.append((child, child_dest))
+                if len(found) == 2:
+                    break
+        return found
 
     @classmethod
     def _path_names(cls, dag_path_str: str) -> list[str]:
