@@ -46,6 +46,10 @@ To teach the sorter your studio's words, add them under `category_keywords`. The
 3. **When it can't tell, it asks.** A name that points two ways or nowhere goes to Manual Assignment instead of a guess.
 4. **It remembers you.** A manual reassignment, or an asset you dragged into a different category folder yourself, keeps that category on every later run.
 
+## Performance
+
+Analyze runs one pass over the scene, so cost grows with the number of objects instead of with its square. Shared-material and sibling lookups used to be re-done for every object. Profiled on a simulated 1,000-piece kit sharing one material, that check alone went from about 1,000,000 Maya calls to about 2,000, with identical results. Lookups are cached for a single Analyze and thrown away after, so a changed scene never gets a stale answer.
+
 ## Troubleshooting
 
 **"Access is denied" / WinError 5 during install.** Your Documents folder is probably synced by OneDrive or protected by Windows Security's *Controlled folder access*. The installer falls back to `%LOCALAPPDATA%\NexusSorter` on its own and tells you when it did. If both locations are blocked, pause OneDrive sync or allow `maya.exe` under *Controlled folder access*, then drag the installer in again.
