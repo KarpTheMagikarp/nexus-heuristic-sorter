@@ -12,7 +12,7 @@ from maya.app.general.mayaMixin import MayaQWidgetDockableMixin
 from .config import logger
 from .hierarchy import MayaUndoChunk
 from .naming import NamingResolver
-from .categorization import CategorizationEngine, Confidence, AssignmentSource
+from .categorization import CategorizationEngine, Confidence, AssignmentSource, SKIPPED_SOURCES
 from .batch_processor import NexusBatchProcessor
 from .lifecycle import is_stray_category_folder
 from .delegates import DestinationDelegate, NexusCheckboxStyle, AssetCheckDelegate
@@ -498,8 +498,8 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
             return  # header/group row - nothing to reassign
 
         data = item.data(0, QtCore.Qt.UserRole)
-        if not data or data.get("source") == AssignmentSource.SKIPPED_REFERENCED:
-            # no menu, execute_sorting_pass refuses locked/referenced nodes anyway
+        if not data or data.get("source") in SKIPPED_SOURCES:
+            # no menu, execute_sorting_pass never moves skipped rows anyway
             return
 
         menu = QtWidgets.QMenu(self.preview_tree)
@@ -525,7 +525,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         selected = [
             (it, it.data(0, QtCore.Qt.UserRole)) for it in self.preview_tree.selectedItems()
             if it.childCount() == 0 and it.data(0, QtCore.Qt.UserRole)
-            and it.data(0, QtCore.Qt.UserRole).get("source") != AssignmentSource.SKIPPED_REFERENCED
+            and it.data(0, QtCore.Qt.UserRole).get("source") not in SKIPPED_SOURCES
         ]
         selected_items = [pair[0] for pair in selected]
         targets = selected if (primary_item in selected_items and len(selected) > 1) else [(primary_item, primary_data)]
@@ -577,7 +577,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
             for j in range(top.childCount()):
                 row = top.child(j)
                 data = row.data(0, QtCore.Qt.UserRole)
-                if not data or data.get("source") == AssignmentSource.SKIPPED_REFERENCED:
+                if not data or data.get("source") in SKIPPED_SOURCES:
                     continue
                 if not select_scope_active or row.checkState(0) == QtCore.Qt.Checked:
                     targets.append((row, data))
@@ -621,7 +621,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
             for j in range(top.childCount()):
                 row = top.child(j)
                 data = row.data(0, QtCore.Qt.UserRole)
-                if not data or data.get("source") == AssignmentSource.SKIPPED_REFERENCED:
+                if not data or data.get("source") in SKIPPED_SOURCES:
                     continue
                 if not select_scope_active or row.checkState(0) == QtCore.Qt.Checked:
                     targets.append((row, data))
@@ -1092,7 +1092,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         skipped_pile = []
 
         for data in result["plan"]:
-            if data["source"] == AssignmentSource.SKIPPED_REFERENCED:
+            if data["source"] in SKIPPED_SOURCES:
                 skipped_pile.append(data)
                 continue
             # manual review means NO destination found at all. gating on
@@ -1197,19 +1197,25 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
 
         if skipped_pile:
             # no context menu here, execute_sorting_pass refuses these nodes anyway
-            self.skipped_group = QtWidgets.QTreeWidgetItem(["Skipped (Referenced / Locked)"])
+            self.skipped_group = QtWidgets.QTreeWidgetItem(["Skipped"])
             self.preview_tree.addTopLevelItem(self.skipped_group)
             header_font = self.skipped_group.font(0)
             header_font.setBold(True)
             self.skipped_group.setFont(0, header_font)
 
             for data in skipped_pile:
-                row = QtWidgets.QTreeWidgetItem([data["original"], "Skipped", data["proposed"], "-"])
+                # one section, but each row says why, a referenced file and a
+                # split rig need very different fixes from the artist
+                split_rig = data["source"] == AssignmentSource.SKIPPED_SPLIT_RIG
+                status = "Skipped (Rig Split)" if split_rig else "Skipped (Referenced)"
+                why = ("Its skeleton sits outside this mesh's group, so moving it would split the rig. "
+                       "Group the mesh and its skeleton together, then Analyze again."
+                       if split_rig else "Referenced/locked - reassignment is disabled.")
+                row = QtWidgets.QTreeWidgetItem([data["original"], status, data["proposed"], "-"])
                 for col in range(4):
                     row.setForeground(col, QtGui.QBrush(self.COLOR_WARN))
                     # not the shared ROW_TOOLTIP, no right-click menu exists here
-                    row.setToolTip(col, "Double-click to frame item in 3D viewport. "
-                                         "Referenced/locked - reassignment is disabled.")
+                    row.setToolTip(col, f"Double-click to frame item in 3D viewport. {why}")
                 row.setData(0, QtCore.Qt.UserRole, data)
                 self.skipped_group.addChild(row)
             self.skipped_group.setExpanded(False)
@@ -1299,7 +1305,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
         if manual_pile:
             summary += f" {len(manual_pile)} need review."
         if skipped_pile:
-            summary += f" {len(skipped_pile)} skipped (locked/referenced)."
+            summary += f" {len(skipped_pile)} skipped (see the Skipped section)."
         if stray_folders:
             summary += f" {len(stray_folders)} deprecated folder(s) flagged."
         self._set_feedback(summary, self.COLOR_WARN if (manual_pile or skipped_pile or stray_folders) else None)
@@ -1459,8 +1465,8 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
 
         with self._ui_busy():
             try:
-                fallback_count = sum(1 for d in plan if d["confidence"] == Confidence.LOW and d["source"] != AssignmentSource.SKIPPED_REFERENCED)
-                skipped_count = sum(1 for d in plan if d["source"] == AssignmentSource.SKIPPED_REFERENCED)
+                fallback_count = sum(1 for d in plan if d["confidence"] == Confidence.LOW and d["source"] not in SKIPPED_SOURCES)
+                skipped_count = sum(1 for d in plan if d["source"] in SKIPPED_SOURCES)
                 override_count = sum(1 for d in plan if d["source"] == AssignmentSource.USER_FORCED)
                 unfrozen_count = sum(
                     1 for d in plan
@@ -1511,7 +1517,7 @@ class NexusSorterUI(MayaQWidgetDockableMixin, QtWidgets.QMainWindow):
                 if fallback_count:
                     summary += f" {fallback_count} were low-confidence fallbacks."
                 if skipped_count:
-                    summary += f" {skipped_count} skipped (locked/referenced)."
+                    summary += f" {skipped_count} skipped (see the Skipped section)."
                 drained_quarantined = result.get("drained_folders_quarantined") or []
                 if drained_quarantined:
                     summary += (

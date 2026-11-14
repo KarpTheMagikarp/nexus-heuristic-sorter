@@ -32,6 +32,14 @@ class AssignmentSource(enum.Enum):
     # NexusBatchProcessor._remembered_category
     REMEMBERED = "Remembered"
     SKIPPED_REFERENCED = "Skipped (Referenced)"
+    # rigged mesh whose skeleton no single group covers, see
+    # HierarchyManager.find_rig_root. moving it alone would split the rig
+    SKIPPED_SPLIT_RIG = "Skipped (Rig Split)"
+
+
+# everything commit refuses to touch. the UI and the engine both check this
+# set instead of naming one skip reason, so a new reason can't slip through
+SKIPPED_SOURCES = frozenset({AssignmentSource.SKIPPED_REFERENCED, AssignmentSource.SKIPPED_SPLIT_RIG})
 
 
 class CategorizationEngine:

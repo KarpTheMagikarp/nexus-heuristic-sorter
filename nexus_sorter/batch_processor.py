@@ -9,8 +9,8 @@ import maya.cmds as cmds
 
 from .config import logger, _load_nexus_config
 from .naming import NamingResolver
-from .hierarchy import HierarchyManager, MayaUndoChunk
-from .categorization import CategorizationEngine, Confidence, AssignmentSource
+from .hierarchy import HierarchyManager, MayaUndoChunk, RigSpansGroups
+from .categorization import CategorizationEngine, Confidence, AssignmentSource, SKIPPED_SOURCES
 from .lifecycle import is_stray_category_folder
 from .schema import PlanItem, StrayFolderCandidate, PurgeManifest
 
@@ -149,10 +149,17 @@ class NexusBatchProcessor:
             if is_shielded:
                 # skeleton-anchored root when there is one, the old top-level
                 # climb when there isn't (blendShape-only, sims)
-                move_target = (
-                    HierarchyManager.find_rig_root(transform_node, self.studio_hierarchy.keys(), memo=rig_roots)
-                    or HierarchyManager.get_root_ancestor(transform_node, self.studio_hierarchy.keys())
-                )
+                try:
+                    move_target = (
+                        HierarchyManager.find_rig_root(transform_node, self.studio_hierarchy.keys(), memo=rig_roots)
+                        or HierarchyManager.get_root_ancestor(transform_node, self.studio_hierarchy.keys())
+                    )
+                except RigSpansGroups:
+                    # never split a rig on a guess. stays exactly where it is,
+                    # listed under Skipped with the reason, the artist decides
+                    primary_dest, confidence = "UNASSIGNED_ASSETS", Confidence.LOW
+                    source = AssignmentSource.SKIPPED_SPLIT_RIG
+                    skip_reason = "Skipped: skeleton is outside this mesh's group"
 
             # if the root-ancestor walk couldn't get past a reserved folder at
             # all, this "asset" IS one of our own sort folders - nothing to do
@@ -179,7 +186,10 @@ class NexusBatchProcessor:
 
             # NamingResolver strips old suffixes, re-derives, only re-suffixes
             # on a real collision. this is the actual fix for the stacking bug
-            clean_name = self._claim_unique_name(primary_dest, move_short_name, name_deriver, claimed_names)
+            if source == AssignmentSource.SKIPPED_SPLIT_RIG:
+                clean_name = move_short_name  # untouched, and doesn't eat a name in the unassigned pool
+            else:
+                clean_name = self._claim_unique_name(primary_dest, move_short_name, name_deriver, claimed_names)
 
             is_frozen = CategorizationEngine.check_frozen_transforms(move_target)
 
@@ -618,6 +628,11 @@ class NexusBatchProcessor:
                         logger.warning("User interrupted the sorting pass.")
                         payload["cancelled"] = True
                         break
+
+                    # referenced ones also get stopped by the lock check below,
+                    # a split rig wouldn't, nothing about it is locked
+                    if item.get("source") in SKIPPED_SOURCES:
+                        continue
 
                     current_long_path = item["long_path"]
                     short_name = item["original"]

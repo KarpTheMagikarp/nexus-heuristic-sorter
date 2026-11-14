@@ -14,7 +14,9 @@ import maya.cmds as cmds
 import pytest
 
 from nexus_sorter import batch_processor as bp
+from nexus_sorter.categorization import AssignmentSource
 from nexus_sorter.hierarchy import HierarchyManager as HM
+from nexus_sorter.hierarchy import RigSpansGroups
 
 RESERVED = {"GRP_01_CHARACTERS", "GRP_02_PROPS", "GRP_03_ENVIRONMENT", "GRP_04_VFX", "GRP_05_LIGHTING",
             "UNASSIGNED_ASSETS"}
@@ -181,12 +183,45 @@ def test_no_skeleton_means_no_answer_so_the_old_climb_runs(scene):
     assert HM.find_rig_root(face, RESERVED) is None
 
 
-def test_skeleton_in_a_different_top_level_group_means_no_answer(scene):
-    """nothing holds both, so there's no single group that's safe to move"""
-    jnts = scene.joints("|skeleton|root_jnt", "|skeleton|root_jnt|spine_jnt")
-    body = scene.mesh("|geo|body", skinned_to=jnts)
+def test_blender_armature_next_to_its_mesh_is_flagged_not_split(scene):
+    """the armature + shirt case. nothing holds both, so moving the mesh
+    would leave the skeleton behind. flagged so the caller leaves it alone"""
+    jnts = scene.joints("|armature|root_jnt", "|armature|root_jnt|spine_jnt")
+    shirt = scene.mesh("|FBXASC055_shirt_0_0_0", skinned_to=jnts)
     scene.install()
-    assert HM.find_rig_root(body, RESERVED) is None
+    with pytest.raises(RigSpansGroups):
+        HM.find_rig_root(shirt, RESERVED)
+
+
+def test_mesh_and_skeleton_sorted_apart_into_our_folder_is_flagged(scene):
+    jnts = scene.joints("|GRP_01_CHARACTERS|armature|root_jnt")
+    shirt = scene.mesh("|GRP_01_CHARACTERS|shirt", skinned_to=jnts)
+    scene.install()
+    with pytest.raises(RigSpansGroups):
+        HM.find_rig_root(shirt, RESERVED)
+
+
+def test_cape_stored_away_from_its_character_is_flagged(scene):
+    """only shared group is |LEVEL, which also holds another character.
+    treating |LEVEL as this cape's rig would be the original bug again"""
+    hero_jnts = scene.joints("|LEVEL|chars|hero_rig|skel|root_jnt")
+    scene.mesh("|LEVEL|chars|hero_rig|geo|body", skinned_to=hero_jnts)
+    _character(scene, "|LEVEL|chars|villain_rig")
+    cape = scene.mesh("|LEVEL|props|cape", skinned_to=hero_jnts)
+    scene.install()
+    with pytest.raises(RigSpansGroups):
+        HM.find_rig_root(cape, RESERVED)
+
+
+def test_rig_holding_blendshape_targets_is_not_flagged(scene):
+    """loose static meshes inside a rig group are normal, skipping every
+    rig that kept its targets around would make the tool useless for rigs"""
+    body, _ = _character(scene, "|LEVEL|hero_rig")
+    scene.mesh("|LEVEL|hero_rig|bs_targets|smile")
+    scene.mesh("|LEVEL|hero_rig|bs_targets|frown")
+    scene.mesh("|LEVEL|rock")
+    scene.install()
+    assert HM.find_rig_root(body, RESERVED) == "|LEVEL|hero_rig"
 
 
 def test_every_mesh_of_one_rig_lands_on_the_same_root(scene):
@@ -217,3 +252,58 @@ def test_plan_falls_back_to_the_old_climb_when_there_is_no_skeleton(monkeypatch)
 
     plan = bp.NexusBatchProcessor().analyze_sorting_plan(["|LEVEL|brows|browsShape"], "Auto-Detect")["plan"]
     assert [item["long_path"] for item in plan] == ["|LEVEL"]
+
+
+def _plan_env(monkeypatch, rig_root):
+    cmds.reset_mock(side_effect=True, return_value=True)
+    hm = bp.HierarchyManager
+    monkeypatch.setattr(hm, "get_dag_path", staticmethod(lambda node: True))
+    monkeypatch.setattr(hm, "get_safe_short_name", staticmethod(lambda node: node.strip("|").split("|")[-1]))
+    monkeypatch.setattr(hm, "is_node_locked_or_referenced", classmethod(lambda cls, node: False))
+    monkeypatch.setattr(hm, "find_rig_root", classmethod(rig_root))
+    monkeypatch.setattr(bp.CategorizationEngine, "analyze_asset_dna",
+                        classmethod(lambda cls, node, name: ("GRP_01_CHARACTERS", bp.Confidence.HIGH, True)))
+    monkeypatch.setattr(bp.CategorizationEngine, "check_frozen_transforms", staticmethod(lambda node: True))
+    monkeypatch.setattr(bp.NexusBatchProcessor, "_remembered_category", lambda self, node: None)
+    monkeypatch.setattr(bp.NexusBatchProcessor, "is_quarantine_root", classmethod(lambda cls, node: False))
+    cmds.listRelatives.side_effect = lambda shape, **kw: [shape.rsplit("|", 1)[0]] if kw.get("parent") else []
+    cmds.objExists.return_value = False
+    cmds.ls.return_value = []
+
+
+def _raise_split(cls, node, reserved, memo=None):
+    raise RigSpansGroups(node)
+
+
+def test_split_rig_lands_in_skipped_with_its_name_untouched(monkeypatch):
+    _plan_env(monkeypatch, _raise_split)
+    item = bp.NexusBatchProcessor().analyze_sorting_plan(["|shirt|shirtShape"], "Auto-Detect")["plan"][0]
+    assert item["source"] == AssignmentSource.SKIPPED_SPLIT_RIG
+    assert (item["long_path"], item["proposed"]) == ("|shirt", "shirt")
+    assert "skeleton" in item["skip_reason"]
+
+
+def test_split_rig_is_skipped_even_under_a_forced_override(monkeypatch):
+    """the override picks a folder, it doesn't make splitting a rig safe"""
+    _plan_env(monkeypatch, _raise_split)
+    item = bp.NexusBatchProcessor().analyze_sorting_plan(["|shirt|shirtShape"], "02_PROPS")["plan"][0]
+    assert item["source"] == AssignmentSource.SKIPPED_SPLIT_RIG
+
+
+@pytest.mark.parametrize("source", [AssignmentSource.SKIPPED_SPLIT_RIG, AssignmentSource.SKIPPED_REFERENCED])
+def test_commit_never_moves_or_renames_a_skipped_row(monkeypatch, source):
+    cmds.reset_mock(side_effect=True, return_value=True)
+    monkeypatch.setattr(bp.HierarchyManager, "is_node_locked_or_referenced", classmethod(lambda cls, node: False))
+    cmds.progressWindow.side_effect = lambda *a, **k: False if k.get("isCancelled") else None
+    cmds.objExists.return_value = False
+    cmds.createNode.side_effect = lambda _type, name=None, **_kw: name
+    cmds.listRelatives.return_value = []
+
+    item = {"long_path": "|shirt", "original": "shirt", "proposed": "shirt", "destination": "UNASSIGNED_ASSETS",
+            "confidence": bp.Confidence.LOW, "source": source, "is_frozen": True, "is_shielded": True}
+    result = bp.NexusBatchProcessor().execute_sorting_pass([item])
+
+    assert result["count"] == 0
+    cmds.parent.assert_not_called()
+    cmds.rename.assert_not_called()
+    assert not [c for c in cmds.setAttr.call_args_list if c.args and str(c.args[0]).startswith("|shirt.")]

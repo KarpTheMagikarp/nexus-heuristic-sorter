@@ -29,6 +29,11 @@ class MayaUndoChunk:
             logger.error(f"Transaction aborted due to uncaught error: {exc_val}")
             return False
 
+class RigSpansGroups(Exception):
+    """the mesh's skeleton lives somewhere no single rig group covers.
+    moving the mesh alone would split the rig, so the caller skips it."""
+
+
 class HierarchyManager:
     """dag path lookups, safe renames, reference/lock checks - the boring stuff
     that's easy to get subtly wrong if you just use cmds directly everywhere."""
@@ -89,8 +94,12 @@ class HierarchyManager:
         which always holds both, then climbs only while the next group up
         holds nothing but this rig. controls, helper joints and proxy geo
         driven by our joints count as ours. any other mesh means stop.
-        splitting a rig apart is worse than the bug this fixes, so anything
-        unclear goes the old way instead of guessing."""
+
+        raises RigSpansGroups when there IS a skeleton but no group holds
+        just this rig: mesh and joints in different top-level groups (a
+        Blender armature next to its mesh), or their only shared group
+        also holds someone else's rig. moving the mesh alone would split
+        the rig, so the caller leaves it where it is."""
         reserved = set(reserved_names or ())
         node_long = (cmds.ls(node_name, long=True) or [node_name])[0]
         joints = cls._rig_joints(node_long)
@@ -98,14 +107,16 @@ class HierarchyManager:
             return None
 
         start = cls._common_ancestor([node_long, *joints])
-        # no shared group (skeleton in a different top-level group), or the
-        # only thing they share is one of our own sort folders
-        if start is None or (start.count('|') == 1 and start.strip('|') in reserved):
-            return None
-
         key = (start, frozenset(joints))
         if memo is not None and key in memo:
             return memo[key]
+
+        if start is None or (start.count('|') == 1 and start.strip('|') in reserved):
+            raise RigSpansGroups(node_long)
+        # loose static meshes inside a rig group are normal (blendShape
+        # targets, accessories), another character's skinned mesh isn't
+        if cls._holds_other_rigs(start, joints):
+            raise RigSpansGroups(node_long)
 
         current = start
         while True:
@@ -172,6 +183,16 @@ class HierarchyManager:
             if cls._driven_by_joints(owner, joints):
                 continue
             return True
+        return False
+
+    @classmethod
+    def _holds_other_rigs(cls, group: str, joints: set[str]) -> bool:
+        meshes = cmds.ls(cmds.listRelatives(group, allDescendents=True, type='mesh', fullPath=True) or [],
+                         type='mesh', noIntermediate=True, long=True) or []
+        for mesh in meshes:
+            influences = cls._skin_influences([mesh])
+            if influences and not influences & joints:
+                return True
         return False
 
     @staticmethod

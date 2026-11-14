@@ -23,6 +23,7 @@ No restart needed. Dragging it in again updates an existing install.
 - Analyze never touches the scene.
 - Referenced and locked nodes are never moved or renamed.
 - Rigs and sims are moved as a whole and never renamed internally or frozen.
+- A rig is never split. If a skinned mesh's skeleton sits outside its group (a Blender armature next to its mesh, say), nothing moves and it's listed under Skipped with the reason.
 - Leftover folders are moved to `GRP_DEPRECATED_FOLDERS`, not deleted.
 - Permanent deletion only happens from the Advanced purge drawer, behind a confirm checkbox, and writes a JSON manifest of what it removed first.
 

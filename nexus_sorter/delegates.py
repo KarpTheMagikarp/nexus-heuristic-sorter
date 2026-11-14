@@ -4,7 +4,7 @@ from typing import Any, TYPE_CHECKING
 
 from .qt_compat import QtWidgets, QtCore, QtGui, HAS_CHECK_INDICATOR_FEATURE
 
-from .categorization import AssignmentSource
+from .categorization import SKIPPED_SOURCES
 
 if TYPE_CHECKING:
     # only imported for type checkers, never at runtime - main_window.py
@@ -24,7 +24,7 @@ class DestinationDelegate(QtWidgets.QStyledItemDelegate):
     exactly how that stayed broken for two review rounds in a row.
 
     only activates on an actual reassignable row (has both source and
-    destination in its data, not SKIPPED_REFERENCED). checking source
+    destination in its data, not a skipped row). checking source
     alone isn't enough since a stray-folder-candidate row has neither
     key at all."""
 
@@ -57,7 +57,7 @@ class DestinationDelegate(QtWidgets.QStyledItemDelegate):
         data = item.data(0, QtCore.Qt.UserRole)
         if not data or "destination" not in data or "source" not in data:
             return None, None
-        if data.get("source") == AssignmentSource.SKIPPED_REFERENCED:
+        if data.get("source") in SKIPPED_SOURCES:
             return None, None
         return item, data
 
